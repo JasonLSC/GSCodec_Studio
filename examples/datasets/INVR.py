@@ -4,9 +4,40 @@ import numpy as np
 import torch
 from tqdm import tqdm
 import imageio.v2 as imageio
+from plyfile import PlyData
 from multiprocessing.pool import ThreadPool
-from typing import Dict, Any
+from typing import Dict, Any, NamedTuple
+from pycolmap import SceneManager
 
+from .normalize import (
+    align_principle_axes,
+    similarity_from_cameras,
+    transform_cameras,
+    transform_points,
+)
+
+def fetchPly(path):
+    plydata = PlyData.read(path)
+    vertices = plydata['vertex']
+    positions = np.vstack([vertices['x'], vertices['y'], vertices['z']]).T
+    colors = np.vstack([vertices['red'], vertices['green'], vertices['blue']]).T / 255.0
+    if 'nx' in vertices:
+        normals = np.vstack([vertices['nx'], vertices['ny'], vertices['nz']]).T
+    else:
+        normals = np.zeros_like(positions)
+    if 'time' in vertices:
+        timestamp = vertices['time'][:, None]
+    else:
+        timestamp = None
+    return BasicPointCloud(points=positions, colors=colors, normals=normals, time=timestamp)
+
+class BasicPointCloud(NamedTuple):
+    points : np.array
+    colors : np.array
+    normals : np.array
+    time : np.array = None
+
+# TODO parser读取点云数据，需要parser.points & parser.points_rgb
 class Parser:
     """INVR parser."""
     
@@ -15,6 +46,7 @@ class Parser:
         data_dir: str,
         extension: str = ".png",
         set: str = "train",
+        normalize: bool = False,
         # Anymore parameters?
     ):
         self.data_dir = data_dir
@@ -36,7 +68,7 @@ class Parser:
                 contents = json.load(json_file) 
         else:
             assert False, "Could not recognize set type!"
-            
+        
         # Assuiming Intrinsics of all cameras are the same, which may not always be true
         self.width = contents["w"]
         self.height = contents["h"]
@@ -77,9 +109,41 @@ class Parser:
             tbar.update(1)
         
         with ThreadPool() as pool:
-            pool.map(frame_read_fn, zip(list(range(len(frames))), frames))
+            # pool.map(frame_read_fn, zip(list(range(len(frames))), frames))
+            pool.map(frame_read_fn, zip(list(range(50)), frames))
             pool.close()
             pool.join()
+        
+        # Read and process ply file
+        if self.set == "train":
+            
+            points_mix = fetchPly(os.path.join(self.data_dir, "points3d.ply")) 
+            camtoworlds = np.array(self.c2w)
+            # Normalize the world space.
+            if normalize:
+                T1 = similarity_from_cameras(camtoworlds)
+                camtoworlds = transform_cameras(T1, camtoworlds)
+                points = transform_points(T1, points_mix[0])
+
+                T2 = align_principle_axes(points)
+                camtoworlds = transform_cameras(T2, camtoworlds)
+                points = transform_points(T2, points)
+
+                transform = T2 @ T1
+            else:
+                transform = np.eye(4)
+        
+            self.points = points
+            self.points_rgb = points_mix[1]
+            
+            # size of the scene measured by cameras
+            camera_locations = camtoworlds[:, :3, 3]
+            scene_center = np.mean(camera_locations, axis=0)
+            dists = np.linalg.norm(camera_locations - scene_center, axis=1)
+            self.scene_scale = np.max(dists)
+            
+        
+        
             
         
 class Dataset:
@@ -114,7 +178,7 @@ if __name__ == "__main__":
     parser.add_argument("--data_dir", type=str, default="/data/czwu/Bartender")
     args = parser.parse_args()
     
-    parser_1 = Parser(data_dir=args.data_dir)
+    parser_1 = Parser(data_dir=args.data_dir, normalize=True)
     dataset = Dataset(parser_1)
     
     trainloader = torch.utils.data.DataLoader(
