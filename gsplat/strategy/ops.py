@@ -65,12 +65,19 @@ def _update_param_with_optimizer(
     """
     if names is None:
         # If names is not provided, update all parameters
-        names = list(params.keys())
+        Update_list = []
+        for keys in params.keys():
+            # exclude params related to decoder (MLP), for they don't need to be densified or pruned
+            if "decoder" in keys:
+                continue
+            else:
+                Update_list.append(keys)
+        names = list(Update_list)
 
     for name in names:
         optimizer = optimizers[name]
         for i, param_group in enumerate(optimizer.param_groups):
-            p = param_group["params"][0]
+            p = param_group["params"][0] # p is a tensor, like N * 3 position
             p_state = optimizer.state[p]
             del optimizer.state[p]
             for key in p_state.keys():
@@ -87,7 +94,7 @@ def _update_param_with_optimizer(
 def duplicate(
     params: Union[Dict[str, torch.nn.Parameter], torch.nn.ParameterDict],
     optimizers: Dict[str, torch.optim.Optimizer],
-    state: Dict[str, Tensor],
+    state: Dict[str, Tensor],  # strategy state
     mask: Tensor,
 ):
     """Inplace duplicate the Gaussian with the given mask.
@@ -97,11 +104,16 @@ def duplicate(
         optimizers: A dictionary of optimizers, each corresponding to a parameter.
         mask: A boolean mask to duplicate the Gaussians.
     """
-    device = mask.device
-    sel = torch.where(mask)[0]
-
+    device = mask.device # mask: tensor  length: number of gaussians  Eg. tensor([False, False, False,  ..., False, False, False], device='cuda:0')
+    sel = torch.where(mask)[0] # 取出mask为1的下标
+    # import pdb; pdb.set_trace()
     def param_fn(name: str, p: Tensor) -> Tensor:
-        return torch.nn.Parameter(torch.cat([p, p[sel]]))
+        # 在tensor下直接concat指定下标的tensor
+        # according to STG, the trbf_center attribute will randomize when its gaussian are cloning
+        if name == "trbf_center":
+            return torch.nn.Parameter(torch.cat([p, torch.rand((p[sel].shape[0],1), device="cuda")]))
+        else:
+            return torch.nn.Parameter(torch.cat([p, p[sel]]))
 
     def optimizer_fn(key: str, v: Tensor) -> Tensor:
         return torch.cat([v, torch.zeros((len(sel), *v.shape[1:]), device=device)])
@@ -154,6 +166,9 @@ def split(
         elif name == "opacities" and revised_opacity:
             new_opacities = 1.0 - torch.sqrt(1.0 - torch.sigmoid(p[sel]))
             p_split = torch.logit(new_opacities).repeat(repeats)  # [2N]
+        # according to STG, the trbf_center attribute will randomize when its gaussian are cloning
+        elif name == "trbf_center":
+            p_split = torch.rand((p[sel].shape[0],1), device="cuda").repeat(repeats)
         else:
             p_split = p[sel].repeat(repeats)
         p_new = torch.cat([p[rest], p_split])
