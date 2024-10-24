@@ -30,3 +30,6 @@ def getcolormodel():
 
 def trbfunction(x): 
     return torch.exp(-1*x.pow(2))
+
+def pix2ndc(v, S):
+    return (v * 2.0 + 1.0) / S - 1.0
