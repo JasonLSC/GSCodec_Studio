@@ -5,7 +5,6 @@ import torch
 from torch import Tensor
 
 from .base import Strategy
-# TODO 下面这4个函数可能会因为params里面包含decoder_params而产生不合适的结果，这个问题目前应该已经解决，但是需要测试
 from .ops import duplicate, remove, reset_opa, split, _update_param_with_optimizer
 from typing_extensions import Literal
 
@@ -87,7 +86,7 @@ class STG_Strategy(Strategy):
         assert (
             "means2d" in info
         ), "The 2D means of the Gaussians is required but missing."
-        info["means2d"].retain_grad() # 保存info['means2d']的梯度，目的是什么？
+        info["means2d"].retain_grad()
 
     def step_post_backward(
         self,
@@ -96,44 +95,44 @@ class STG_Strategy(Strategy):
         state: Dict[str, Any],
         step: int,
         info: Dict[str, Any],
-        flag: int, # additional params
-        desicnt: int, # additional params
-        maxbounds: float,  # additional params  may not be the correct type
-        minbounds: float,  # additional params  may not be the correct type
+        flag: int, 
+        desicnt: int, 
+        maxbounds: float, 
+        minbounds: float,  
         packed: bool = False,
-    ):
-        # TODO STG在原本3GDS的基础上进行了修改，采用了更激进的pruning策略，这些修改对应过来应该主要在这个函数内发生，需要进行对应修改
-        
+    ):  
         """Callback function to be executed after the `loss.backward()` call."""
         if step >= self.refine_stop_iter:
-            # TODO freeze weights of omega
-            # 经过测试，至少params["omega"].grad是存在的（self.splats["means"]存在grad这个attribute）
-            params["omega"].grad = params["omega"].grad * self.omegamask # this is likely wrong
+            # freeze weights of omega
+            params["omega"].grad = params["omega"].grad * self.omegamask # TODO check if this is proceed as expected
             self.rotationmask = torch.logical_not(self.omegamask)
-            # TODO freeze weights of rotation
-            params["rotation"].grad = params["rotation"].grad * self.rotationmask # this is likely wrong
+            # freeze weights of rotation
+            params["quats"].grad = params["quats"].grad * self.rotationmask # TODO check if this is proceed as expected
             if step % 1000 == 500 :
                 zmask = params["means"][:,2] < 4.5  
                 remove(params=params, optimizers=optimizers, state=state, mask=zmask)
+                self.omegamask = self._zero_omegabymotion(params, optimizers) # calculate omegamask again to adjust the change of gaussian numbers
                 torch.cuda.empty_cache()
             if step == 10000: 
                 self.removeminmax(params=params, optimizers=optimizers, state=state, maxbounds=maxbounds, minbounds=minbounds)
-            return flag  # 注意return值
+                self.omegamask = self._zero_omegabymotion(params, optimizers) # calculate omegamask again to adjust the change of gaussian numbers
+            return flag 
 
         self._update_state(params, state, info, packed=packed)
         
-        # TODO 目前只考虑STG中densify=1的情况，STG共有3中densify and pruning策略，需要补充
+        # TODO need to consider more strategy, there are totally 3 types of strategy in STG (densify = 1,2,3)
+        # here is a implementation of densify=1
         # omega & rotation mask
         if step ==  8001 :
             omegamask = self._zero_omegabymotion(params, optimizers)
             self.omegamask = omegamask
             # record process
-        elif step > 8001:
-            # TODO freeze weights of omega
+        elif step > 8001: 
+            # freeze weights of omega
             params["omega"].grad = params["omega"].grad * self.omegamask # this is likely wrong
             self.rotationmask = torch.logical_not(self.omegamask)
-            # TODO freeze weights of rotation
-            params["rotation"].grad = params["rotation"].grad * self.rotationmask # this is likely wrong
+            # freeze weights of rotation
+            params["quats"].grad = params["quats"].grad * self.rotationmask # this is likely wrong
         if (
             step > self.refine_start_iter
             and step % self.refine_every == 0
@@ -257,6 +256,7 @@ class STG_Strategy(Strategy):
             torch.exp(params["scales"]).max(dim=-1).values
             <= self.grow_scale3d * state["scene_scale"]
         )
+
         is_dupli = is_grad_high & is_small
         n_dupli = is_dupli.sum().item()
 
@@ -265,7 +265,7 @@ class STG_Strategy(Strategy):
         if step < self.refine_scale2d_stop_iter:
             is_split |= state["radii"] > self.grow_scale2d
         n_split = is_split.sum().item()
-
+        
         # first duplicate
         if n_dupli > 0:
             duplicate(params=params, optimizers=optimizers, state=state, mask=is_dupli)
@@ -339,8 +339,7 @@ class STG_Strategy(Strategy):
         opacitymask = pointopacity > 0.7 # Shape here may not be correct
         
         # 1 we keep omega, 0 we freeze omega 
-        mask = torch.logical_and(torch.logical_and(omegamask.unsqueeze(1), scalemask), torch.logical_and(scalemaskb, opacitymask))
-        
+        mask = torch.logical_and(torch.logical_and(omegamask.unsqueeze(1), scalemask), torch.logical_and(scalemaskb, opacitymask.unsqueeze(1)))
         omeganew = mask.float() * omega
         sel = torch.where(mask)[0]
         
@@ -350,7 +349,7 @@ class STG_Strategy(Strategy):
             else:
                 raise ValueError(f"Unexpected parameter name: {name}")
         def optimizer_fn(key: str, v: Tensor) -> Tensor:
-            return v[sel]
+            return v
 
         # update the parameters and the state in the optimizers
         _update_param_with_optimizer(param_fn, optimizer_fn, params, optimizers, names=["omega"])
