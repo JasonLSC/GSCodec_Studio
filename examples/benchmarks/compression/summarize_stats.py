@@ -32,9 +32,22 @@ def main(results_dir: str, scenes: List[str]):
             for k, v in stats.items():
                 summary[k].append(v)
 
+    stage = "val"
+    for scene in scenes:
+        scene_dir = os.path.join(results_dir, scene)
+        with open(os.path.join(scene_dir, f"stats/{stage}_step29999.json"), "r") as f:
+            stats = json.load(f)
+            for k, v in stats.items():
+                if k in ['psnr', 'ssim', 'lpips']:
+                    summary['val_'+k].append(v)
+
     for k, v in summary.items():
         print(k, np.mean(v))
 
+    mean_summary = {k: np.mean(v) for k, v in summary.items()}
+
+    with open(f"{results_dir}/comp_summary.json", "w") as fp:
+        json.dump(mean_summary, fp)
 
 if __name__ == "__main__":
     tyro.cli(main)
