@@ -17,6 +17,7 @@ from random import randint
 from torch import Tensor
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
+from torch.utils.tensorboard import SummaryWriter
 # from datasets.INVR import Dataset, Parser # This only supports preprocessed Bartender & CBA dataset
 from datasets.INVR_N3D import Parser, Dataset # This only supports preprocessed N3D Dataset
 from gsplat.rendering import rasterization
@@ -60,7 +61,7 @@ class Config:
     antialiased: bool = False
     duration: int = 20 # 20 # number of frames to train
     ssim_lambda: float = 0.2 # Weight for SSIM loss
-    save_steps: List[int] = field(default_factory=lambda: [7_000, 30_000]) # Steps to save the model
+    save_steps: List[int] = field(default_factory=lambda: [7_000, 25_000, 30_000]) # Steps to save the model
     eval_steps: List[int] = field(default_factory=lambda: [7_000, 25_000, 30_000]) # Steps to evaluate the model # 7_000, 30_000
     # eval_steps: List[int] = field(default_factory=lambda: [1_000, 2_000, 3_000, 3_500, 7_000, 25_000, 30_000])
     desicnt: int = 6
@@ -73,9 +74,10 @@ class Config:
     movelr = 3.5
     omega_lr = 0.0001
     
-    model_path = "/home/czwu/gsplat_output_Full/STG_N3D_version" # dir of output model
+    tb_every: int = 100 # Dump information to tensorboard every this steps
+    model_path = "/home/czwu/oursSTG_output/model/flame_steak" # dir of output model
     data_dir: str = "/data/czwu/Neural_3D_Dataset/flame_steak/colmap_0" # modified to fit STG style data loader
-    result_dir: str = "/home/czwu/gsplat_output_Full/results/flame_steak" # Directory to save results
+    result_dir: str = "/home/czwu/oursSTG_output/results/flame_steak" # Directory to save results
     ckpt: str = None # Serve as checkpoint, Same as "start_checkpoint" in STG
     lpips_net: str = "alex" # "alex" or "vgg"
     
@@ -189,6 +191,7 @@ class Runner:
         # Write cfg file: Skipped
         self.device = self.cfg.device
         
+        os.makedirs(cfg.model_path, exist_ok=True)
          # Where to dump results.
         os.makedirs(cfg.result_dir, exist_ok=True)
 
@@ -202,6 +205,9 @@ class Runner:
         
         self.render_dir_difference = f"{cfg.result_dir}/renders/difference_map"
         os.makedirs(self.render_dir_difference, exist_ok=True)
+        
+        # Tensorboard
+        self.writer = SummaryWriter(log_dir=f"{cfg.result_dir}/tb")
         
         # Load data: Training data should contain initial points and colors.
         parser = Parser(model_path=self.cfg.model_path, source_path=self.cfg.data_dir, duration=cfg.duration, shuffle=False, eval=self.cfg.eval, resolution=cfg.resolution, data_device=cfg.device)
@@ -338,29 +344,14 @@ class Runner:
             # distributed=self.world_size > 1, # TODO
             **kwargs,
         )
-        # Decode for batchsize>1 
-        render_colors_output = []
-        for i in range(batch_size):
-            render_colors_single = render_colors[i,:].unsqueeze(0)
-            rays_single = rays[i,:].unsqueeze(0)
-            if i == 0:
-                render_colors_output = render_colors_single.permute(0,3,1,2)
-                render_colors_output = self.decoder(render_colors_output, rays_single, timestamp) # 1 , 3
-                render_colors_output = render_colors_output.permute(0,2,3,1)
-            else:
-                render_colors_single = render_colors_single.permute(0,3,1,2)
-                render_colors_single = self.decoder(render_colors_single, rays_single, timestamp) # 1 , 3
-                render_colors_single = render_colors_single.permute(0,2,3,1)
-                render_colors_output = torch.cat((render_colors_output,render_colors_single), dim=0)
-        
-        # Decode for batchsize=1 
-        # render_colors = render_colors.permute(0,3,1,2)
-        # render_colors = self.decoder(render_colors, rays, timestamp) # 1 , 3
-        # render_colors = render_colors.permute(0,2,3,1)
-        
+
+        # Decode
+        render_colors = render_colors.permute(0,3,1,2)
+        render_colors = self.decoder(render_colors, rays, timestamp) # 1 , 3
+        render_colors = render_colors.permute(0,2,3,1)
+
         # pixels(GT) shape: [1, H, W, 3]
-        # return render_colors, render_alphas, info
-        return render_colors_output, render_alphas, info
+        return render_colors, render_alphas, info
     
     def train(self):
         cfg = self.cfg
@@ -397,7 +388,7 @@ class Runner:
                         traincamdict[i].append(self.trainset[j])
         else: 
             # Do not support batch size = 1 for now
-            raise ValueError(f"Batch size = 1 are not supported: {cfg.batch_size}")
+            raise ValueError(f"Batch size = 1 is not supported: {cfg.batch_size}")
         print("organizing data complete!")
         # DataLoader for batchsize=1
         # trainloader = torch.utils.data.DataLoader(
@@ -423,6 +414,7 @@ class Runner:
             
             timeindex = randint(0, cfg.duration-1)
             data_set = random.sample(traincamdict[timeindex], cfg.batch_size)
+            # TODO Test if the following part is the reason why oursSTG has longer training time
             for i in range(cfg.batch_size):
                 if i == 0:
                     Ks = data_set[i]["K"].float().to(device)
@@ -491,7 +483,16 @@ class Runner:
                     (difference * 255).astype(np.uint8),
                 )
           
-            # TODO Write TensorBoard here,according to gsplat
+            # Write TensorBoard here,according to gsplat
+            if world_rank == 0 and cfg.tb_every > 0 and step % cfg.tb_every == 0:
+                mem = torch.cuda.max_memory_allocated() / 1024**3
+                self.writer.add_scalar("train/loss", loss.item(), step)
+                self.writer.add_scalar("train/l1loss", l1loss.item(), step)
+                self.writer.add_scalar("train/ssimloss", ssimloss.item(), step)
+                self.writer.add_scalar("train/num_GS", len(self.splats["means"]), step)
+                # self.writer.add_histogram("train/means_GS", self.splats["means"], step)
+                self.writer.add_scalar("train/mem", mem, step)
+                self.writer.flush()
             
             # save checkpoint before updating the model
             if step in [i - 1 for i in cfg.save_steps] or step == max_steps - 1:
@@ -597,7 +598,6 @@ class Runner:
                     f"{self.render_dir}/{stage}_step{step}_{i:04d}.png",
                     canvas,
                 )
-                
                 difference = abs(colors - pixels).squeeze().detach().cpu().numpy()
                 imageio.imwrite(
                     f"{self.render_dir}/difference_map/train_step{step}_{i:04d}.png",
@@ -628,7 +628,10 @@ class Runner:
             # save stats as json
             with open(f"{self.stats_dir}/{stage}_step{step:04d}.json", "w") as f:
                 json.dump(stats, f)
-            # save stats to tensorboard, Skipped
+            # save stats to tensorboard
+            for k, v in stats.items():
+                self.writer.add_scalar(f"{stage}/{k}", v, step)
+            self.writer.flush()
             
     
     @torch.no_grad()
