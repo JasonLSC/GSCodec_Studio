@@ -25,6 +25,7 @@ from helper.STG.helper_model import getcolormodel, trbfunction
 from utils import AppearanceOptModule, CameraOptModule, knn, rgb_to_sh, set_random_seed
 from gsplat.strategy.STG_Strategy import STG_Strategy # import densification and pruning strategy that fits STG model
 from fused_ssim import fused_ssim
+from operator import itemgetter
 
 @dataclass
 class Config:
@@ -59,11 +60,11 @@ class Config:
     packed: bool = False
     sparse_grad: bool = False
     antialiased: bool = False
-    duration: int = 20 # 20 # number of frames to train
+    duration: int = 50 # 20 # number of frames to train
     ssim_lambda: float = 0.2 # Weight for SSIM loss
     save_steps: List[int] = field(default_factory=lambda: [7_000, 25_000, 30_000]) # Steps to save the model
     eval_steps: List[int] = field(default_factory=lambda: [7_000, 25_000, 30_000]) # Steps to evaluate the model # 7_000, 30_000
-    # eval_steps: List[int] = field(default_factory=lambda: [1_000, 2_000, 3_000, 3_500, 7_000, 25_000, 30_000])
+    # eval_steps: List[int] = field(default_factory=lambda: [1_000, 2_000, 3_000, 4_000, 5_000, 6_000, 7_000, 25_000, 30_000])
     desicnt: int = 6
     position_lr_init = 1.6e-4
     scaling_lr = 5e-3
@@ -75,9 +76,12 @@ class Config:
     omega_lr = 0.0001
     
     tb_every: int = 100 # Dump information to tensorboard every this steps
-    model_path = "/home/czwu/oursSTG_output/model/flame_steak" # dir of output model
+    # model_path = "/home/czwu/oursSTG_output/model/flame_steak" # dir of output model
+    # data_dir: str = "/data/czwu/Neural_3D_Dataset/flame_steak/colmap_0" # modified to fit STG style data loader
+    # result_dir: str = "/home/czwu/oursSTG_output/results/flame_steak" # Directory to save results
+    model_path = "/home/czwu/oursSTG_output_CPU_3/model/flame_steak" # dir of output model
     data_dir: str = "/data/czwu/Neural_3D_Dataset/flame_steak/colmap_0" # modified to fit STG style data loader
-    result_dir: str = "/home/czwu/oursSTG_output/results/flame_steak" # Directory to save results
+    result_dir: str = "/home/czwu/oursSTG_output_CPU_3/results/flame_steak" # Directory to save results
     ckpt: str = None # Serve as checkpoint, Same as "start_checkpoint" in STG
     lpips_net: str = "alex" # "alex" or "vgg"
     
@@ -377,19 +381,23 @@ class Runner:
         
         # organize data accoring to their timestamp, to ensure data in the same batch have the same timestamp
         # TODO This part consumes too much time when duration is high
+        # import pdb; pdb.set_trace()
         print("organizing data accoring to their timestamp, this may take a while...")
+        cam_num = int(len(self.trainset)/cfg.duration)
         if cfg.batch_size > 1:
-            traincameralist = self.trainset
+            # traincameralist = self.trainset
             traincamdict = {}
-            for i in range(cfg.duration): # 0 to 4, -> (0.0, to 0.8)
-                traincamdict[i] = []
-                for j in range(len(self.trainset)):
-                    if self.trainset[j]["timestamp"] == i/cfg.duration:
-                        traincamdict[i].append(self.trainset[j])
+            for timeindex in range(cfg.duration): 
+                traincamdict[timeindex] = itemgetter(*[timeindex+cfg.duration*i for i in range(cam_num)])(self.trainset)
+                # traincamdict[i] = []
+                # for j in range(len(self.trainset)):
+                #     if self.trainset[j]["timestamp"] == i/cfg.duration:
+                #         traincamdict[i].append(self.trainset[j])
         else: 
             # Do not support batch size = 1 for now
             raise ValueError(f"Batch size = 1 is not supported: {cfg.batch_size}")
         print("organizing data complete!")
+        
         # DataLoader for batchsize=1
         # trainloader = torch.utils.data.DataLoader(
         #     self.trainset,
@@ -413,7 +421,14 @@ class Runner:
             #     data = next(trainloader_iter)
             
             timeindex = randint(0, cfg.duration-1)
+            # data_set = random.sample(traincamdict[timeindex], cfg.batch_size)
+            # cam_num = int(len(self.trainset)/cfg.duration)
+            # data_set = random.sample(itemgetter(*[timeindex+cfg.duration*i for i in range(cam_num)])(self.trainset), cfg.batch_size)
             data_set = random.sample(traincamdict[timeindex], cfg.batch_size)
+            
+            # timeindex = 0
+            # data_set = traincamdict[0][0:2]
+            
             # TODO Test if the following part is the reason why oursSTG has longer training time
             for i in range(cfg.batch_size):
                 if i == 0:
