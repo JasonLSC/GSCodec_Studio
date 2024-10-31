@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from torch import Tensor, device
 
 from .ops import fake_quantize_ste, log_transform, inverse_log_transform
-from .entropy_model import Entropy_factorized, Entropy_factorized_optimized, Entropy_gaussian
+from .entropy_model import Entropy_factorized, Entropy_factorized_optimized, Entropy_factorized_optimized_refactor, Entropy_gaussian
 from gsplat.compression_simulation import entropy_model
 
 use_clamp = False
@@ -17,7 +17,7 @@ class CompressionSimulation:
     """
     """
     def __init__(self, entropy_model_enable: bool = False,
-                 entropy_steps: int = 0, 
+                 entropy_steps: Dict[str, int] = None, 
                  device: device = None, 
                  ada_mask_opt: bool = False,
                  ada_mask_step: int = 10_000,
@@ -83,19 +83,22 @@ class CompressionSimulation:
                 "means": None,
                 # "scales": Entropy_factorized(channel=3).to(self.device),
                 # "quats": Entropy_factorized(channel=4).to(self.device),
-                "scales": Entropy_factorized_optimized(channel=3).to(self.device),
-                "quats": Entropy_factorized_optimized(channel=4).to(self.device),
+                "scales": Entropy_factorized_optimized_refactor(channel=3, filters=(3, 3)).to(self.device),
+                "quats": Entropy_factorized_optimized_refactor(channel=4).to(self.device),
                 "opacities": Entropy_factorized(channel=1).to(self.device),
-                "sh0": Entropy_factorized_optimized(channel=3).to(self.device),
+                "sh0": Entropy_factorized_optimized_refactor(channel=3, filters=(3, 3)).to(self.device),
                 "shN": None
             }
 
             self.entropy_model_optimizers = {}
             for k, v in self.entropy_models.items():
-                if isinstance(v, Entropy_factorized) or isinstance(v, Entropy_factorized_optimized):
+                if isinstance(v, Entropy_factorized) or isinstance(v, Entropy_factorized_optimized) or isinstance(v, Entropy_factorized_optimized_refactor):
                     v_opt = torch.optim.Adam(
                         [{"params": p, "lr": 1e-4, "name": n} for n, p in v.named_parameters()]
                     )
+                    # v_opt = torch.optim.SGD(
+                    #     [{"params": p, "lr": 1e-4, "name": n} for n, p in v.named_parameters()]
+                    # )
                 else:
                     v_opt = None
                 self.entropy_model_optimizers.update({k: v_opt})
@@ -162,7 +165,7 @@ class CompressionSimulation:
             fq_out_dict = fake_quantize_ste(param, self.bds["quats"][0], self.bds["quats"][1], self.q_bitwidth["quats"])
         
         # entropy constraint
-        if step > self.entropy_steps and self.entropy_model_enable and self.entropy_model_option["quats"]:
+        if step > self.entropy_steps["quats"] and self.entropy_model_enable and self.entropy_model_option["quats"]:
                 if choose_idx is not None:
                     esti_bits = self.entropy_models["quats"](fq_out_dict["output_value"][choose_idx], fq_out_dict["q_step"])
                 else:
@@ -181,7 +184,7 @@ class CompressionSimulation:
             fq_out_dict = fake_quantize_ste(param, self.bds["scales"][0], self.bds["scales"][1], self.q_bitwidth["scales"])
 
         # entropy constraint
-        if step > self.entropy_steps and self.entropy_model_enable and self.entropy_model_option["scales"]:
+        if step > self.entropy_steps["scales"] and self.entropy_model_enable and self.entropy_model_option["scales"]:
             # factorized model
             if choose_idx is not None:
                 esti_bits = self.entropy_models["scales"](fq_out_dict["output_value"][choose_idx], fq_out_dict["q_step"])
@@ -203,7 +206,7 @@ class CompressionSimulation:
         fq_out_dict = fake_quantize_ste(param, self.bds["opacities"][0], self.bds["opacities"][1], 8)
 
         # entropy constraint
-        if step > self.entropy_steps and self.entropy_model_enable and self.entropy_model_option["opacities"]:
+        if step > self.entropy_steps["opacities"] and self.entropy_model_enable and self.entropy_model_option["opacities"]:
             fq_out_dict["output_value"] = fq_out_dict["output_value"].unsqueeze(1)
             if choose_idx is not None:
                 esti_bits = self.entropy_models["opacities"](fq_out_dict["output_value"][choose_idx], fq_out_dict["q_step"])
@@ -222,7 +225,7 @@ class CompressionSimulation:
             fq_out_dict = fake_quantize_ste(param, self.bds["sh0"][0], self.bds["sh0"][1], self.q_bitwidth["sh0"])
         
         # entropy constraint
-        if step > self.entropy_steps and self.entropy_model_enable and self.entropy_model_option["sh0"]:
+        if step > self.entropy_steps["sh0"] and self.entropy_model_enable and self.entropy_model_option["sh0"]:
             fq_out_dict["output_value"] = fq_out_dict["output_value"].squeeze(1)
             if choose_idx is not None:
                 esti_bits = self.entropy_models["sh0"](fq_out_dict["output_value"][choose_idx], fq_out_dict["q_step"])
@@ -234,7 +237,7 @@ class CompressionSimulation:
     
 
     def simulate_compression_shN(self, param: torch.nn.Parameter, step: int, choose_idx: torch.Tensor) -> Tensor:
-        if step > self.shN_ada_mask_step:
+        if self.shN_ada_mask_opt and step > self.shN_ada_mask_step:
             param = self.shN_ada_mask(param, step)
             return param, None
 

@@ -51,6 +51,7 @@ class PngCompression:
             "quats": _compress_png_kbit,
             "opacities": _compress_png,
             "sh0": _compress_png_kbit,
+            # "shN": _compress_kmeans,
             "shN": _compress_masked_kmeans,
         }
         if param_name in compress_fn_map:
@@ -65,6 +66,7 @@ class PngCompression:
             "quats": _decompress_png_kbit,
             "opacities": _decompress_png,
             "sh0": _decompress_png_kbit,
+            # "shN": _decompress_kmeans,
             "shN": _decompress_masked_kmeans,
         }
         if param_name in decompress_fn_map:
@@ -398,7 +400,7 @@ def _compress_kmeans(
     param_name: str,
     params: Tensor,
     n_clusters: int = 65536,
-    quantization: int = 6,
+    quantization: int = 8,
     verbose: bool = True,
     **kwargs,
 ) -> Dict[str, Any]:
@@ -500,7 +502,7 @@ def _compress_masked_kmeans(
     param_name: str,
     params: Tensor,
     n_clusters: int = 32768, # 65536
-    quantization: int = 6,
+    quantization: int = 8,
     verbose: bool = True,
     **kwargs,
 ) -> Dict[str, Any]:
