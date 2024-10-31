@@ -107,7 +107,8 @@ class Config:
     # Bit-rate distortion trade-off parameter
     rd_lambda: float = 1e-2 # default: 1e-2
     # Steps to enable entropy model into training pipeline
-    entropy_steps: int = 10_000
+    # entropy_steps: int = 10_000
+    entropy_steps: Dict[str, int] = field(default_factory=lambda: {"means": -1, "quats": 10_000, "scales": 10_000, "opacities": 10_000, "sh0": 20_000, "shN": 10_000})
 
     # Enable shN adaptive mask
     shN_ada_mask_opt: bool = False
@@ -417,6 +418,9 @@ class Runner:
                                                     cfg.shN_ada_mask_opt,
                                                     cfg.ada_mask_steps,
                                                     cap_max=cap_max,)
+            if cfg.entropy_model_opt:
+                selected_key = min((k for k, v in cfg.entropy_steps.items() if v > 0), key=lambda k: cfg.entropy_steps[k])
+                self.entropy_min_step = cfg.entropy_steps[selected_key]
         
         # Profiler
         self.profiler: Optional[torch.profiler.profile] = None
@@ -771,13 +775,12 @@ class Runner:
                     )
                 
                 # entropy constraint
-                if cfg.entropy_model_opt and step > cfg.entropy_steps:
+                if cfg.entropy_model_opt and step>self.entropy_min_step:
                     total_esti_bits = 0
-
-                    for k, v in self.esti_bits_dict.items():
-                        if v is not None:
+                    for n, n_step in cfg.entropy_steps.items():
+                        if step > n_step and self.esti_bits_dict[n] is not None:
                             # maybe give different params with different weights
-                            total_esti_bits += torch.sum(v) / v.numel()
+                            total_esti_bits += torch.sum(self.esti_bits_dict[n]) / self.esti_bits_dict[n].numel()
                         else:
                             total_esti_bits += 0
 
@@ -828,12 +831,13 @@ class Runner:
                         canvas = torch.cat([pixels, colors], dim=2).detach().cpu().numpy()
                         canvas = canvas.reshape(-1, *canvas.shape[2:])
                         self.writer.add_image("train/render", canvas, step)
-                    if cfg.entropy_model_opt and step > cfg.entropy_steps:
-                        self.writer.add_scalar("train/bpp_loss", total_esti_bits.item(), step)
+                    if cfg.entropy_model_opt and step>self.entropy_min_step:
                         self.writer.add_histogram("train_hist/quats", self.splats["quats"], step)
                         self.writer.add_histogram("train_hist/scales", self.splats["scales"], step)
                         self.writer.add_histogram("train_hist/opacities", self.splats["opacities"], step)
                         self.writer.add_histogram("train_hist/sh0", self.splats["sh0"], step)
+                        if total_esti_bits > 0:
+                            self.writer.add_scalar("train/bpp_loss", total_esti_bits.item(), step)
                     if self.compression_sim_method.shN_ada_mask_opt and step > cfg.ada_mask_steps:
                         self.writer.add_scalar("train/ada_mask", self.compression_sim_method.shN_ada_mask.get_mask_ratio(), step)
                         

@@ -13,7 +13,7 @@ SCENE_LIST="train truck" #  truck
 # CAP_MAX=490000
 
 # 1M GSs
-RESULT_DIR="results/benchmark_tt_mcmc_1M_png_compression_adaMask"
+RESULT_DIR="results/benchmark_tt_mcmc_1M_png_compression_pipe_wo_adamask"
 CAP_MAX=1000000
 
 # # 4M GSs
@@ -32,13 +32,14 @@ run_single_scene() {
     echo "Running $SCENE on GPU: $GPU_ID"
 
     # train without eval
-    CUDA_VISIBLE_DEVICES=$GPU_ID python simple_trainer.py mcmc --eval_steps -1 --disable_viewer --data_factor 1 \
-        --strategy.cap-max $CAP_MAX \
-        --data_dir $SCENE_DIR/$SCENE/ \
-        --result_dir $RESULT_DIR/$SCENE/ \
-        --compression_sim \
-        --entropy_model_opt
-        # --compression png
+    # CUDA_VISIBLE_DEVICES=$GPU_ID python simple_trainer.py mcmc --eval_steps -1 --disable_viewer --data_factor 1 \
+    #     --strategy.cap-max $CAP_MAX \
+    #     --data_dir $SCENE_DIR/$SCENE/ \
+    #     --result_dir $RESULT_DIR/$SCENE/ \
+    #     --compression_sim \
+    #     --entropy_model_opt \
+    #     # --shN_ada_mask_opt
+    #     # --compression png
 
 
     # eval: use vgg for lpips to align with other benchmarks
@@ -56,7 +57,7 @@ run_single_scene() {
 
 
 # ----------------- Experiment Loop -------------- #
-GPU_LIST=(3 4)
+GPU_LIST=(4 5)
 GPU_COUNT=${#GPU_LIST[@]}
 
 SCENE_IDX=-1
