@@ -15,8 +15,10 @@ from pycolmap import SceneManager
 from helper.STG.dataset_readers import sceneLoadTypeCallbacks
 from helper.STG.camera_utils import camera_to_JSON, cameraList_from_camInfosv2
 from helper.STG.general_utils import PILtoTorch
+from helper.STG.time_utils import timer, timeblock
 
 # reference to STG's scene __init__.py
+@timer
 class Parser:
     """COLMAP parser."""
 

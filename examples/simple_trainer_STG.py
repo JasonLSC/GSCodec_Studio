@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple, Union
 import yaml
+import tyro
 import tqdm
 import imageio
 import matplotlib.pyplot as plt
@@ -372,12 +373,13 @@ class Runner:
         
         flag = 0
         
-        schedulers = [
-            # means has a learning rate schedule, that end at 0.01 of the initial value
-            torch.optim.lr_scheduler.ExponentialLR(
-                self.optimizers["means"], gamma=0.01 ** (1.0 / max_steps)
-            ),
-        ]
+        ### used in gsplat, but no need for now in STG
+        # schedulers = [
+        #     # means has a learning rate schedule, that end at 0.01 of the initial value
+        #     torch.optim.lr_scheduler.ExponentialLR(
+        #         self.optimizers["means"], gamma=0.01 ** (1.0 / max_steps)
+        #     ),
+        # ]
         
         # organize data accoring to their timestamp, to ensure data in the same batch have the same timestamp
         # TODO This part consumes too much time when duration is high
@@ -673,7 +675,22 @@ def main(cfg: Config):
         runner.train()
 
 if __name__ == "__main__":
-    cfg = Config()
+    # Config objects we can choose between.
+    # Each is a tuple of (CLI description, config object).
+    configs = {
+        "default": (
+            "Spacetime Gaussians training from the original paper.",
+            Config(
+            ),
+        ),
+        "compression": (
+            "Spacetime Gaussians training and compression",
+            Config(
+            ),
+        ),
+    }
+    cfg = tyro.extras.overridable_config_cli(configs)    
+
     main(cfg)
     
     

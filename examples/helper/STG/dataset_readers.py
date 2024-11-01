@@ -24,7 +24,6 @@ from .sh_utils import SH2RGB
 from .graphics_utils import BasicPointCloud
 import glob
 import natsort
-from simple_knn._C import distCUDA2
 import torch
 
 class CameraInfo(NamedTuple):

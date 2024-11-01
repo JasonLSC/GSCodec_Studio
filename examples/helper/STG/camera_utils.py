@@ -9,12 +9,14 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+
 from .cameras import Camera
 from .cameras import Camerass # ass 
 import numpy as np
 
 from .general_utils import PILtoTorch
 from .graphics_utils import fov2focal
+from .time_utils import timer, timeblock
 import torch 
 import os 
 WARNED = False
@@ -64,7 +66,7 @@ def loadCam(args, id, cam_info, resolution_scale):
                   image_name=cam_info.image_name, uid=id, data_device=args.data_device, near=cam_info.near, far=cam_info.far, timestamp=cam_info.timestamp, rayo=rays_o, rayd=rays_d)
 
 
-
+@timer
 def loadCamv2(args, id, cam_info, resolution_scale):
     orig_w, orig_h = cam_info.image.size
 
