@@ -220,7 +220,7 @@ class Runner:
         parser = Parser(model_path=self.cfg.model_path, source_path=self.cfg.data_dir, duration=cfg.duration, 
                         shuffle=False, eval=self.cfg.eval, resolution=cfg.resolution, data_device='cpu')
         self.parser = parser
-        self.trainset = Dataset(parser=self.parser, split="train", num_views=2, use_fake_length=True, fake_length=cfg.max_steps+100)
+        self.trainset = Dataset(parser=self.parser, split="train", num_views=cfg.batch_size, use_fake_length=True, fake_length=cfg.max_steps+100)
         self.testset = Dataset(parser=self.parser, split="test", num_views=1)
 
 

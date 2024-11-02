@@ -3,7 +3,7 @@ SCENE_DIR="data/neural_3d"
 # SCENE_LIST="coffee_martini cook_spinach cut_roasted_beef flame_salmon_1 flame_steak sear_steak" # cook_spinach
 SCENE_LIST="coffee_martini cook_spinach"
 
-RESULT_DIR="results/stg_neu3d_desicnt12"
+RESULT_DIR="results/stg_neu3d_bs4"
 # ----------------- Training Setting-------------- #
 
 # ----------------- Main Job --------------------- #
@@ -17,14 +17,15 @@ run_single_scene() {
         --model_path $RESULT_DIR/$SCENE/ \
         --data_dir $SCENE_DIR/$SCENE/colmap_0 \
         --result_dir $RESULT_DIR/$SCENE/ \
-        --desicnt 12
+        --batch_size 4
+        # --desicnt 12
 
 }
 
 # ----------------- Main Job --------------------- #
 
 # ----------------- Experiment Loop -------------- #
-GPU_LIST=(3 4 5 6 7)
+GPU_LIST=(5 6 7)
 GPU_COUNT=${#GPU_LIST[@]}
 
 SCENE_IDX=-1
