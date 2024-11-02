@@ -1,6 +1,7 @@
 import json
 import math
 import os
+from matplotlib.style import use
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -64,7 +65,7 @@ class Config:
     duration: int = 50 # 20 # number of frames to train
     ssim_lambda: float = 0.2 # Weight for SSIM loss
     save_steps: List[int] = field(default_factory=lambda: [7_000, 25_000, 30_000]) # Steps to save the model
-    eval_steps: List[int] = field(default_factory=lambda: [7_000, 25_000, 30_000]) # Steps to evaluate the model # 7_000, 30_000
+    eval_steps: List[int] = field(default_factory=lambda: [3_000, 7_000, 25_000, 30_000]) # Steps to evaluate the model # 7_000, 30_000
     # eval_steps: List[int] = field(default_factory=lambda: [1_000, 2_000, 3_000, 4_000, 5_000, 6_000, 7_000, 25_000, 30_000])
     desicnt: int = 6
     position_lr_init = 1.6e-4
@@ -215,11 +216,33 @@ class Runner:
         self.writer = SummaryWriter(log_dir=f"{cfg.result_dir}/tb")
         
         # Load data: Training data should contain initial points and colors.
-        parser = Parser(model_path=self.cfg.model_path, source_path=self.cfg.data_dir, duration=cfg.duration, shuffle=False, eval=self.cfg.eval, resolution=cfg.resolution, data_device=cfg.device)
+        parser = Parser(model_path=self.cfg.model_path, source_path=self.cfg.data_dir, duration=cfg.duration, 
+                        shuffle=False, eval=self.cfg.eval, resolution=cfg.resolution, data_device='cpu')
         self.parser = parser
-        self.trainset = Dataset(parser=self.parser, split="train")
-        self.testset = Dataset(parser=self.parser, split="test")
+        self.trainset = Dataset(parser=self.parser, split="train", num_views=2, use_fake_length=True, fake_length=cfg.max_steps+100)
+        self.testset = Dataset(parser=self.parser, split="test", num_views=1)
+
+
         
+        self.trainloader = torch.utils.data.DataLoader(
+            self.trainset,
+            batch_size=1,
+            shuffle=True,
+            num_workers=32,
+            # persistent_workers=True,
+            pin_memory=True,
+            # collate_fn=collate_fn
+        )
+
+        self.testloader = torch.utils.data.DataLoader(
+            self.testset,
+            batch_size=1,
+            shuffle=False,
+            num_workers=0,
+            # persistent_workers=True,
+            pin_memory=True,
+            # collate_fn=collate_fn
+        )
         # scene scale
         self.scene_scale = self.parser.scene_scale * 1.1 * cfg.global_scale
         print("Scene scale:", self.scene_scale)
@@ -297,7 +320,6 @@ class Runner:
         basicfunction, 
         rays, 
         camtoworld,
-        batch_size,
         **kwargs,
     ) -> Tuple[Tensor, Tensor, Dict]:
         # preprocess splats data
@@ -322,6 +344,7 @@ class Runner:
         opacities = torch.sigmoid(self.splats["opacities"])  # [N,]
         opacity = opacities * trbfoutput.squeeze()
         
+        # Question: Why detach
         tforpoly = trbfdistanceoffset.detach()
         # Calculate Polynomial Motion Trajectory
         means_motion = means + motion[:, 0:3] * tforpoly + motion[:, 3:6] * tforpoly * tforpoly + motion[:, 6:9] * tforpoly *tforpoly * tforpoly
@@ -384,21 +407,23 @@ class Runner:
         # organize data accoring to their timestamp, to ensure data in the same batch have the same timestamp
         # TODO This part consumes too much time when duration is high
         # import pdb; pdb.set_trace()
-        print("organizing data accoring to their timestamp, this may take a while...")
-        cam_num = int(len(self.trainset)/cfg.duration)
-        if cfg.batch_size > 1:
-            # traincameralist = self.trainset
-            traincamdict = {}
-            for timeindex in range(cfg.duration): 
-                traincamdict[timeindex] = itemgetter(*[timeindex+cfg.duration*i for i in range(cam_num)])(self.trainset)
-                # traincamdict[i] = []
-                # for j in range(len(self.trainset)):
-                #     if self.trainset[j]["timestamp"] == i/cfg.duration:
-                #         traincamdict[i].append(self.trainset[j])
-        else: 
-            # Do not support batch size = 1 for now
-            raise ValueError(f"Batch size = 1 is not supported: {cfg.batch_size}")
-        print("organizing data complete!")
+        # print("organizing data accoring to their timestamp, this may take a while...")
+        # cam_num = int(len(self.trainset)/cfg.duration)
+        
+        # if True:
+        #     if cfg.batch_size > 1:
+        #         # traincameralist = self.trainset
+        #         traincamdict = {}
+        #         for timeindex in range(cfg.duration): 
+        #             traincamdict[timeindex] = itemgetter(*[timeindex+cfg.duration*i for i in range(cam_num)])(self.trainset)
+        #             # traincamdict[i] = []
+        #             # for j in range(len(self.trainset)):
+        #             #     if self.trainset[j]["timestamp"] == i/cfg.duration:
+        #             #         traincamdict[i].append(self.trainset[j])
+        #     else: 
+        #         # Do not support batch size = 1 for now
+        #         raise ValueError(f"Batch size = 1 is not supported: {cfg.batch_size}")
+        #     print("organizing data complete!")
         
         # DataLoader for batchsize=1
         # trainloader = torch.utils.data.DataLoader(
@@ -413,39 +438,53 @@ class Runner:
         
         # Training loop.
         global_tic = time.time()
+        
         pbar = tqdm.tqdm(range(init_step, max_steps))
-        for step in pbar:
-            # Viewer
+        # trainloader_iter = iter(self.trainloader)
+        # for batch in self.trainloader:
+        step = 0
+        for batch in self.trainloader:
+            step += 1
+            pbar.update(1)
+            if step > max_steps:
+                pbar.close()
+                break
             # try:
             #     data = next(trainloader_iter)
             # except StopIteration:
             #     trainloader_iter = iter(trainloader)
             #     data = next(trainloader_iter)
             
-            timeindex = randint(0, cfg.duration-1)
+            # timeindex = randint(0, cfg.duration-1)
             # data_set = random.sample(traincamdict[timeindex], cfg.batch_size)
             # cam_num = int(len(self.trainset)/cfg.duration)
             # data_set = random.sample(itemgetter(*[timeindex+cfg.duration*i for i in range(cam_num)])(self.trainset), cfg.batch_size)
-            data_set = random.sample(traincamdict[timeindex], cfg.batch_size)
-            
+            # data_set = random.sample(traincamdict[timeindex], cfg.batch_size)
+            # batch = next(iter(self.trainloader))
+            # batch = next(trainloader_iter)
+            # timestamp=timestamp, # [C]
+            pixels = batch["image"][0].to(device)
+            Ks, rays, camtoworld = batch["K"][0].to(device), batch["ray"][0].to(device), batch["camtoworld"][0].to(device)
+            timestamp = batch['timestamp'][0].to(device).to(torch.float32)
+            num_views, height, width, _ = pixels.shape
             # timeindex = 0
             # data_set = traincamdict[0][0:2]
             
-            # TODO Test if the following part is the reason why oursSTG has longer training time
-            for i in range(cfg.batch_size):
-                if i == 0:
-                    Ks = data_set[i]["K"].float().to(device)
-                    pixels = data_set[i]["image"].float().to(device)
-                    height, width = pixels.shape[0:2]
-                    timestamp = data_set[i]["timestamp"]
-                    rays = data_set[i]["ray"].float().to(device)
-                    camtoworld = data_set[i]["camtoworld"].float().to(device)
-                else:
-                    Ks = torch.stack((Ks, data_set[i]["K"].float().to(device)), dim=0)
-                    pixels = torch.stack((pixels, data_set[i]["image"].float().to(device)), dim=0)
-                    rays = torch.stack((rays, data_set[i]["ray"].float().to(device)), dim=0)
-                    camtoworld = torch.stack((camtoworld, data_set[i]["camtoworld"].float().to(device)), dim=0)
-            rays = rays.squeeze()
+            # # TODO Test if the following part is the reason why oursSTG has longer training time
+            # for i in range(cfg.batch_size):
+            #     if i == 0:
+            #         Ks = data_set[i]["K"].float().to(device)
+            #         pixels = data_set[i]["image"].float().to(device)
+            #         height, width = pixels.shape[0:2]
+            #         timestamp = data_set[i]["timestamp"]
+            #         rays = data_set[i]["ray"].float().to(device)
+            #         camtoworld = data_set[i]["camtoworld"].float().to(device)
+            #     else:
+            #         Ks = torch.stack((Ks, data_set[i]["K"].float().to(device)), dim=0)
+            #         pixels = torch.stack((pixels, data_set[i]["image"].float().to(device)), dim=0)
+            #         rays = torch.stack((rays, data_set[i]["ray"].float().to(device)), dim=0)
+            #         camtoworld = torch.stack((camtoworld, data_set[i]["camtoworld"].float().to(device)), dim=0)
+            # rays = rays.squeeze()
 
             # forward
             renders, alphas, info = self.rasterize_splats(
@@ -458,7 +497,7 @@ class Runner:
                 basicfunction=trbfunction,
                 rays=rays, # [C, 6, H, W]
                 camtoworld=camtoworld, # [C, 4, 4]
-                batch_size=cfg.batch_size,
+                # batch_size=cfg.batch_size,
             )
 
             if renders.shape[-1] == 4:
@@ -487,7 +526,7 @@ class Runner:
             pbar.set_description(desc)
             
             # write images (gt and render); output L1 difference map; Only plot the first image in one batch
-            if world_rank == 0 and (step == 7_000 or step == 25_000) :
+            if world_rank == 0 and step == 200 :
                 canvas = torch.cat([pixels[0:1,...], colors[0:1,...]], dim=2).detach().cpu().numpy()
                 canvas = canvas.reshape(-1, *canvas.shape[2:])
                 imageio.imwrite(
@@ -574,20 +613,21 @@ class Runner:
         world_rank = self.world_rank
         # world_size = self.world_size
 
-        valloader = torch.utils.data.DataLoader(
-            self.testset, batch_size=1, shuffle=False, num_workers=1
-        )
+        # valloader = torch.utils.data.DataLoader(
+        #     self.testset, batch_size=1, shuffle=False, num_workers=1
+        # )
+        
         ellipse_time = 0
         metrics = defaultdict(list)
-        for i, data in enumerate(valloader):
-            R = data['R'].float().to(device)
-            T = data['T'].float().to(device) 
-            Ks = data["K"].float().to(device)
-            pixels = data["image"].float().to(device) # / 255.0
-            height, width = pixels.shape[1:3]
-            timestamp = data["timestamp"].float().to(device)
-            rays = data["ray"].squeeze(0).float().to(device) 
-            camtoworld = data['camtoworld'].float().to(device)
+        for i, batch in enumerate(self.testloader):
+            # R = data['R'].float().to(device)
+            # T = data['T'].float().to(device) 
+            Ks = batch["K"][0].float().to(device)
+            pixels = batch["image"][0].float().to(device) # / 255.0
+            num_views, height, width, _ = pixels.shape
+            timestamp = batch["timestamp"][0].float().to(device)
+            rays = batch["ray"][0].float().to(device) 
+            camtoworld = batch['camtoworld'][0].float().to(device)
             
             torch.cuda.synchronize()
             tic = time.time()
@@ -599,7 +639,6 @@ class Runner:
                 basicfunction=trbfunction,
                 rays=rays,
                 camtoworld=camtoworld,
-                batch_size=1,
             )
             torch.cuda.synchronize()
             ellipse_time += time.time() - tic
@@ -628,7 +667,7 @@ class Runner:
                 metrics["lpips"].append(self.lpips(colors_p, pixels_p))
 
         if world_rank == 0:
-            ellipse_time /= len(valloader)
+            ellipse_time /= len(self.testloader)
 
             stats = {k: torch.stack(v).mean().item() for k, v in metrics.items()}
             stats.update(

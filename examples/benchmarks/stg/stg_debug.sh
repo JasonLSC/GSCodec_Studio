@@ -13,5 +13,5 @@ do
         --model_path $RESULT_DIR/$SCENE/ \
         --data_dir $SCENE_DIR/$SCENE/colmap_0 \
         --result_dir $RESULT_DIR/$SCENE/ \
-        --duration 1
+        --duration 2
 done 

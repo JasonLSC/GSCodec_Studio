@@ -50,24 +50,24 @@ def inverse_sigmoidv3(x):
 def sigmoidv3(x):
     return 1.4*torch.sigmoid(x) 
 
-@timer
-def PILtoTorch(pil_image, resolution):
-    # 1. 使用 torchvision.transforms 替代手动转换
-    transform = transforms.Compose([
-        transforms.Resize(resolution),
-        transforms.ToTensor()
-    ])
-    # 2. 直接转换为tensor
-    return transform(pil_image)
-
 # @timer
 # def PILtoTorch(pil_image, resolution):
-#     resized_image_PIL = pil_image.resize(resolution)
-#     resized_image = torch.from_numpy(np.array(resized_image_PIL)) / 255.0
-#     if len(resized_image.shape) == 3:
-#         return resized_image.permute(2, 0, 1)
-#     else:
-#         return resized_image.unsqueeze(dim=-1).permute(2, 0, 1)
+#     # 1. 使用 torchvision.transforms 替代手动转换
+#     transform = transforms.Compose([
+#         transforms.Resize(resolution),
+#         transforms.ToTensor()
+#     ])
+#     # 2. 直接转换为tensor
+#     return transform(pil_image)
+
+# @timer
+def PILtoTorch(pil_image, resolution):
+    resized_image_PIL = pil_image.resize(resolution)
+    resized_image = torch.from_numpy(np.array(resized_image_PIL)) / 255.0
+    if len(resized_image.shape) == 3:
+        return resized_image.permute(2, 0, 1)
+    else:
+        return resized_image.unsqueeze(dim=-1).permute(2, 0, 1)
 
 def get_expon_lr_func(
     lr_init, lr_final, lr_delay_steps=0, lr_delay_mult=1.0, max_steps=1000000

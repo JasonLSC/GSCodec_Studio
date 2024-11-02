@@ -10,6 +10,7 @@
 #
 
 
+from json import load
 from .cameras import Camera
 from .cameras import Camerass # ass 
 import numpy as np
@@ -68,8 +69,7 @@ def loadCam(args, id, cam_info, resolution_scale):
 
 @timer
 def loadCamv2(args, id, cam_info, resolution_scale):
-    orig_w, orig_h = cam_info.image.size
-
+    orig_w, orig_h =  cam_info.width, cam_info.height
     if args.resolution in [1, 2, 4, 8]:
         resolution = round(orig_w/(resolution_scale * args.resolution)), round(orig_h/(resolution_scale * args.resolution))
     else:  # should be a type that converts to float
@@ -89,13 +89,15 @@ def loadCamv2(args, id, cam_info, resolution_scale):
         scale = float(global_down) * float(resolution_scale)
         resolution = (int(orig_w / scale), int(orig_h / scale))
 
-    resized_image_rgb = PILtoTorch(cam_info.image, resolution)
+    # resized_image_rgb = PILtoTorch(cam_info.image, resolution)
 
-    gt_image = resized_image_rgb[:3, ...]
-    loaded_mask = None
+    # gt_image = resized_image_rgb[:3, ...]
+    # loaded_mask = None
     
-    if resized_image_rgb.shape[1] == 4:
-        loaded_mask = resized_image_rgb[3:4, ...]
+    # if resized_image_rgb.shape[1] == 4:
+    #     loaded_mask = resized_image_rgb[3:4, ...]
+    gt_image = None
+    loaded_mask = None
 
     cameradirect = cam_info.hpdirecitons
     camerapose = cam_info.pose 
@@ -105,10 +107,13 @@ def loadCamv2(args, id, cam_info, resolution_scale):
     else :
         rays_o = None
         rays_d = None
+
     return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
                   FoVx=cam_info.FovX, FoVy=cam_info.FovY, 
                   image=gt_image, gt_alpha_mask=loaded_mask,
-                  image_name=cam_info.image_name, uid=id, data_device=args.data_device, near=cam_info.near, far=cam_info.far, timestamp=cam_info.timestamp, rayo=rays_o, rayd=rays_d,cxr=cam_info.cxr,cyr=cam_info.cyr)
+                  image_name=cam_info.image_name, uid=id, data_device=args.data_device, 
+                  near=cam_info.near, far=cam_info.far, timestamp=cam_info.timestamp, 
+                  rayo=rays_o, rayd=rays_d,cxr=cam_info.cxr,cyr=cam_info.cyr)
 
 
 

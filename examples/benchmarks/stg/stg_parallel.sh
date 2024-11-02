@@ -1,6 +1,7 @@
 # ----------------- Training Setting-------------- #
 SCENE_DIR="data/neural_3d"
-SCENE_LIST="cut_roasted_beef flame_salmon_1 flame_steak sear_steak"
+SCENE_LIST="cook_spinach " 
+#  flame_salmon_1 flame_steak sear_steak
 # SCENE_LIST="coffee_martini cook_spinach"
 
 RESULT_DIR="results/stg_neu3d"
@@ -23,7 +24,7 @@ run_single_scene() {
 # ----------------- Main Job --------------------- #
 
 # ----------------- Experiment Loop -------------- #
-GPU_LIST=(4 5 6 7)
+GPU_LIST=(3 4 5 6 7)
 GPU_COUNT=${#GPU_LIST[@]}
 
 SCENE_IDX=-1
