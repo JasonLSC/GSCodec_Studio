@@ -67,7 +67,8 @@ class Config:
     save_steps: List[int] = field(default_factory=lambda: [7_000, 25_000, 30_000]) # Steps to save the model
     eval_steps: List[int] = field(default_factory=lambda: [3_000, 7_000, 25_000, 30_000]) # Steps to evaluate the model # 7_000, 30_000
     # eval_steps: List[int] = field(default_factory=lambda: [1_000, 2_000, 3_000, 4_000, 5_000, 6_000, 7_000, 25_000, 30_000])
-    desicnt: int = 6
+    # Number of densification
+    desicnt: int = 6 # default: 6
     position_lr_init = 1.6e-4
     scaling_lr = 5e-3
     rotation_lr = 1e-3
@@ -228,7 +229,7 @@ class Runner:
             self.trainset,
             batch_size=1,
             shuffle=True,
-            num_workers=32,
+            num_workers=16,
             # persistent_workers=True,
             pin_memory=True,
             # collate_fn=collate_fn
