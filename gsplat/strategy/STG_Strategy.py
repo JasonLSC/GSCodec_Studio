@@ -120,7 +120,8 @@ class STG_Strategy(Strategy):
 
         self._update_state(params, state, info, packed=packed)
         
-        # TODO need to consider more strategy, there are totally 3 types of strategy in STG (densify = 1,2,3)
+        # TODO: need to consider more strategy, there are totally 3 types of strategy in STG (densify = 1,2,3)
+        # sicheng: in original STG, n3d scenes in night use densify=1, scenes in day use densify=2
         # here is a implementation of densify=1
         # omega & rotation mask
         if step ==  8001 :
@@ -133,6 +134,7 @@ class STG_Strategy(Strategy):
             self.rotationmask = torch.logical_not(self.omegamask)
             # freeze weights of rotation
             params["quats"].grad = params["quats"].grad * self.rotationmask # this is likely wrong
+        
         if (
             step > self.refine_start_iter
             and step % self.refine_every == 0
@@ -328,14 +330,14 @@ class STG_Strategy(Strategy):
         optimizers: Dict[str, torch.optim.Optimizer],
         threhold=0.15,
         ):
-        scales = torch.exp(params["scales"])
-        motions = params["motion"]
-        pointopacity = torch.sigmoid(params["opacities"])
-        omega = params["omega"]
+        scales = torch.exp(params["scales"]) # [N, 3]
+        motions = params["motion"] # [N, 9]
+        pointopacity = torch.sigmoid(params["opacities"]) # [N, 1]
+        omega = params["omega"] # [N, 4]
         
-        omegamask = torch.sum(torch.abs(motions[:, 0:3]), dim=1) > 0.3
-        scalemask = torch.max(scales, dim=1).values.unsqueeze(1) > 0.2
-        scalemaskb = torch.max(scales, dim=1).values.unsqueeze(1) < 0.6
+        omegamask = torch.sum(torch.abs(motions[:, 0:3]), dim=1) > 0.3 # sum of 1st order motion coeffs > 0.3
+        scalemask = torch.max(scales, dim=1).values.unsqueeze(1) > 0.2 # max scale > 0.2
+        scalemaskb = torch.max(scales, dim=1).values.unsqueeze(1) < 0.6 # max scale < 0.6
         opacitymask = pointopacity > 0.7 # Shape here may not be correct
         
         # 1 we keep omega, 0 we freeze omega 
