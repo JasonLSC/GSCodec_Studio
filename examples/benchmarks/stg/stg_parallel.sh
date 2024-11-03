@@ -43,4 +43,5 @@ done
 
 # Wait for finishing the jobs across all scenes 
 wait
+
 echo "All scenes finished."

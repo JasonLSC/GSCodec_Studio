@@ -8,7 +8,7 @@ import numpy as np
 import time
 from dataclasses import dataclass, field
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Literal, Optional, Tuple, Union
 import yaml
 import tyro
 import tqdm
@@ -22,12 +22,17 @@ from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from torch.utils.tensorboard import SummaryWriter
 # from datasets.INVR import Dataset, Parser # This only supports preprocessed Bartender & CBA dataset
 from datasets.INVR_N3D import Parser, Dataset # This only supports preprocessed N3D Dataset
-from gsplat.rendering import rasterization
+
 from helper.STG.helper_model import getcolormodel, trbfunction
 from utils import AppearanceOptModule, CameraOptModule, knn, rgb_to_sh, set_random_seed
-from gsplat.strategy.STG_Strategy import STG_Strategy # import densification and pruning strategy that fits STG model
+
 from fused_ssim import fused_ssim
 from operator import itemgetter
+
+from gsplat.compression import PngCompression
+from gsplat.rendering import rasterization
+from gsplat.strategy.STG_Strategy import STG_Strategy # import densification and pruning strategy that fits STG model
+from gsplat.compression_simulation import STGCompressionSimulation
 
 @dataclass
 class Config:
@@ -64,8 +69,8 @@ class Config:
     antialiased: bool = False
     duration: int = 50 # 20 # number of frames to train
     ssim_lambda: float = 0.2 # Weight for SSIM loss
-    save_steps: List[int] = field(default_factory=lambda: [7_000, 25_000, 30_000]) # Steps to save the model
-    eval_steps: List[int] = field(default_factory=lambda: [3_000, 7_000, 25_000, 30_000]) # Steps to evaluate the model # 7_000, 30_000
+    save_steps: List[int] = field(default_factory=lambda: [3000, 7_000, 15_000, 30_000]) # Steps to save the model
+    eval_steps: List[int] = field(default_factory=lambda: [3_000, 7_000, 15_000, 30_000]) # Steps to evaluate the model # 7_000, 30_000
     # eval_steps: List[int] = field(default_factory=lambda: [1_000, 2_000, 3_000, 4_000, 5_000, 6_000, 7_000, 25_000, 30_000])
     # Number of densification
     desicnt: int = 6 # default: 6
@@ -79,14 +84,35 @@ class Config:
     omega_lr = 0.0001
     
     tb_every: int = 100 # Dump information to tensorboard every this steps
-    # model_path = "/home/czwu/oursSTG_output/model/flame_steak" # dir of output model
-    # data_dir: str = "/data/czwu/Neural_3D_Dataset/flame_steak/colmap_0" # modified to fit STG style data loader
-    # result_dir: str = "/home/czwu/oursSTG_output/results/flame_steak" # Directory to save results
-    model_path = "/home/czwu/oursSTG_output_CPU_3/model/flame_steak" # dir of output model
-    data_dir: str = "/data/czwu/Neural_3D_Dataset/flame_steak/colmap_0" # modified to fit STG style data loader
-    result_dir: str = "/home/czwu/oursSTG_output_CPU_3/results/flame_steak" # Directory to save results
-    ckpt: str = None # Serve as checkpoint, Same as "start_checkpoint" in STG
+    model_path: str = "" # dir of output model
+    data_dir: str = "" # modified to fit STG style data loader
+    result_dir: str = "" # Directory to save results
+    ckpt: Optional[List[str]] = None # Serve as checkpoint, Same as "start_checkpoint" in STG
     lpips_net: str = "alex" # "alex" or "vgg"
+
+    # compression 
+    # Name of compression strategy to use
+    compression: Optional[Literal["png"]] = None
+
+    # Enable profiler
+    profiler_enabled: bool = False
+
+    # Enable compression simulation
+    compression_sim: bool = False
+    # Name of quantization simulation strategy to use
+    quantization_sim: Optional[Literal["round", "noise", "vq"]] = None
+
+    # Enable entropy model
+    entropy_model_opt: bool = False
+    # Bit-rate distortion trade-off parameter
+    rd_lambda: float = 1e-2 # default: 1e-2
+    # Steps to enable entropy model into training pipeline
+    entropy_steps: Dict[str, int] = field(default_factory=lambda: {"means": -1, "quats": 10_000, "scales": 10_000, "opacities": 10_000, "sh0": 20_000, "shN": 10_000})
+
+    # Enable shN adaptive mask
+    shN_ada_mask_opt: bool = False
+    # Steps to enable shN adaptive mask
+    ada_mask_steps: int = 10_000
     
 
 def create_splats_with_optimizers(
@@ -223,8 +249,6 @@ class Runner:
         self.trainset = Dataset(parser=self.parser, split="train", num_views=cfg.batch_size, use_fake_length=True, fake_length=cfg.max_steps+100)
         self.testset = Dataset(parser=self.parser, split="test", num_views=1)
 
-
-        
         self.trainloader = torch.utils.data.DataLoader(
             self.trainset,
             batch_size=1,
@@ -239,7 +263,7 @@ class Runner:
             self.testset,
             batch_size=1,
             shuffle=False,
-            num_workers=0,
+            num_workers=8,
             # persistent_workers=True,
             pin_memory=True,
             # collate_fn=collate_fn
@@ -288,6 +312,13 @@ class Runner:
         
         # Compression Strategy
         # TODO Compression Strategy should proceed here, according to GSplat
+        self.compression_method = None
+        if cfg.compression is not None:
+            if cfg.compression == "png":
+                self.compression_method = PngCompression()
+            else:
+                raise ValueError(f"Unknown compression strategy: {cfg.compression}")
+
         
         # Ignored initializing pose optimization
         # Ignored initializing appearance optimization
@@ -325,10 +356,10 @@ class Runner:
     ) -> Tuple[Tensor, Tensor, Dict]:
         # preprocess splats data
         means = self.splats["means"]  # [N, 3]
-        # quats = F.normalize(self.splats["quats"], dim=-1)  # [N, 4]
-        # rasterization does normalization internally
         quats = self.splats["quats"]  # [N, 4]
         scales = torch.exp(self.splats["scales"])  # [N, 3]
+        opacities = torch.sigmoid(self.splats["opacities"])  # [N,]
+
         trbfcenter = self.splats["trbf_center"] # [N, 1]
         trbfscale = self.splats["trbf_scale"] # [N, 1]
         pointtimes = torch.ones((means.shape[0],1), dtype=means.dtype, requires_grad=False, device="cuda") + 0 # 
@@ -342,7 +373,7 @@ class Runner:
         trbfdistanceoffset = timestamp * pointtimes - trbfcenter
         trbfdistance =  trbfdistanceoffset / torch.exp(trbfscale) 
         trbfoutput = basicfunction(trbfdistance)
-        opacities = torch.sigmoid(self.splats["opacities"])  # [N,]
+        # opacity decay 
         opacity = opacities * trbfoutput.squeeze()
         
         # Question: Why detach
@@ -388,6 +419,7 @@ class Runner:
         
         world_rank = 0 # TODO reserved for future work
         self.world_rank = world_rank
+        # Dump cfg.
         if world_rank == 0:
             with open(f"{cfg.result_dir}/cfg.yml", "w") as f:
                 yaml.dump(vars(cfg), f)
@@ -439,10 +471,7 @@ class Runner:
         
         # Training loop.
         global_tic = time.time()
-        
         pbar = tqdm.tqdm(range(init_step, max_steps))
-        # trainloader_iter = iter(self.trainloader)
-        # for batch in self.trainloader:
         step = 0
         for batch in self.trainloader:
             step += 1
@@ -450,43 +479,16 @@ class Runner:
             if step > max_steps:
                 pbar.close()
                 break
-            # try:
-            #     data = next(trainloader_iter)
-            # except StopIteration:
-            #     trainloader_iter = iter(trainloader)
-            #     data = next(trainloader_iter)
             
-            # timeindex = randint(0, cfg.duration-1)
-            # data_set = random.sample(traincamdict[timeindex], cfg.batch_size)
-            # cam_num = int(len(self.trainset)/cfg.duration)
-            # data_set = random.sample(itemgetter(*[timeindex+cfg.duration*i for i in range(cam_num)])(self.trainset), cfg.batch_size)
-            # data_set = random.sample(traincamdict[timeindex], cfg.batch_size)
-            # batch = next(iter(self.trainloader))
-            # batch = next(trainloader_iter)
-            # timestamp=timestamp, # [C]
+            # get batch data
             pixels = batch["image"][0].to(device)
             Ks, rays, camtoworld = batch["K"][0].to(device), batch["ray"][0].to(device), batch["camtoworld"][0].to(device)
             timestamp = batch['timestamp'][0].to(device).to(torch.float32)
             num_views, height, width, _ = pixels.shape
-            # timeindex = 0
-            # data_set = traincamdict[0][0:2]
-            
-            # # TODO Test if the following part is the reason why oursSTG has longer training time
-            # for i in range(cfg.batch_size):
-            #     if i == 0:
-            #         Ks = data_set[i]["K"].float().to(device)
-            #         pixels = data_set[i]["image"].float().to(device)
-            #         height, width = pixels.shape[0:2]
-            #         timestamp = data_set[i]["timestamp"]
-            #         rays = data_set[i]["ray"].float().to(device)
-            #         camtoworld = data_set[i]["camtoworld"].float().to(device)
-            #     else:
-            #         Ks = torch.stack((Ks, data_set[i]["K"].float().to(device)), dim=0)
-            #         pixels = torch.stack((pixels, data_set[i]["image"].float().to(device)), dim=0)
-            #         rays = torch.stack((rays, data_set[i]["ray"].float().to(device)), dim=0)
-            #         camtoworld = torch.stack((camtoworld, data_set[i]["camtoworld"].float().to(device)), dim=0)
-            # rays = rays.squeeze()
 
+            # compression simulation
+
+            
             # forward
             renders, alphas, info = self.rasterize_splats(
                 # R=R,
@@ -527,7 +529,7 @@ class Runner:
             pbar.set_description(desc)
             
             # write images (gt and render); output L1 difference map; Only plot the first image in one batch
-            if world_rank == 0 and step == 200 :
+            if world_rank == 0 and step in cfg.save_steps:
                 canvas = torch.cat([pixels[0:1,...], colors[0:1,...]], dim=2).detach().cpu().numpy()
                 canvas = canvas.reshape(-1, *canvas.shape[2:])
                 imageio.imwrite(
@@ -540,7 +542,7 @@ class Runner:
                     (difference * 255).astype(np.uint8),
                 )
           
-            # Write TensorBoard here,according to gsplat
+            # TensorBoard
             if world_rank == 0 and cfg.tb_every > 0 and step % cfg.tb_every == 0:
                 mem = torch.cuda.max_memory_allocated() / 1024**3
                 self.writer.add_scalar("train/loss", loss.item(), step)
@@ -553,6 +555,7 @@ class Runner:
             
             # save checkpoint before updating the model
             if step in [i - 1 for i in cfg.save_steps] or step == max_steps - 1:
+                # train log
                 mem = torch.cuda.max_memory_allocated() / 1024**3
                 stats = {
                     "mem": mem,
@@ -565,7 +568,10 @@ class Runner:
                     "w",
                 ) as f:
                     json.dump(stats, f)
-                data = {"step": step, "splats": self.splats.state_dict()}
+                # save checkpoint
+                data = {"step": step, 
+                        "splats": self.splats.state_dict(),
+                        "decoder": self.decoder.state_dict()}
                 torch.save(
                     data, f"{self.ckpt_dir}/ckpt_{step}_rank{self.world_rank}.pt"
                 )
@@ -611,18 +617,15 @@ class Runner:
         print("Running evaluation...")
         cfg = self.cfg
         device = self.device
-        world_rank = self.world_rank
+        world_rank = 0 # TODO: bad hard code, to fix
+        # world_rank = self.world_rank
         # world_size = self.world_size
 
-        # valloader = torch.utils.data.DataLoader(
-        #     self.testset, batch_size=1, shuffle=False, num_workers=1
-        # )
-        
         ellipse_time = 0
         metrics = defaultdict(list)
-        for i, batch in enumerate(self.testloader):
-            # R = data['R'].float().to(device)
-            # T = data['T'].float().to(device) 
+        pbar = tqdm.tqdm(range(0, len(self.testloader)))
+        for t_idx, batch in enumerate(self.testloader): # t_idx
+            
             Ks = batch["K"][0].float().to(device)
             pixels = batch["image"][0].float().to(device) # / 255.0
             num_views, height, width, _ = pixels.shape
@@ -647,25 +650,32 @@ class Runner:
             colors = torch.clamp(colors, 0.0, 1.0)
             canvas_list = [pixels, colors]
             
+            desc = ""
             if world_rank == 0:
-                # write images
+                # write GT-vs-rendered image
                 canvas = torch.cat(canvas_list, dim=2).squeeze(0).cpu().numpy()
                 canvas = (canvas * 255).astype(np.uint8)
                 imageio.imwrite(
-                    f"{self.render_dir}/{stage}_step{step}_{i:04d}.png",
+                    f"{self.render_dir}/{stage}_step{step}_{t_idx:04d}.png",
                     canvas,
                 )
-                difference = abs(colors - pixels).squeeze().detach().cpu().numpy()
-                imageio.imwrite(
-                    f"{self.render_dir}/difference_map/train_step{step}_{i:04d}.png",
-                    (difference * 255).astype(np.uint8),
-                )
+
+                # write difference image
+                # difference = abs(colors - pixels).squeeze().detach().cpu().numpy()
+                # imageio.imwrite(
+                #     f"{self.render_dir}/difference_map/{stage}_step{step}_{t_idx:04d}.png",
+                #     (difference * 255).astype(np.uint8),
+                # )
 
                 pixels_p = pixels.permute(0, 3, 1, 2)  # [1, 3, H, W]
                 colors_p = colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
                 metrics["psnr"].append(self.psnr(colors_p, pixels_p))
                 metrics["ssim"].append(self.ssim(colors_p, pixels_p))
                 metrics["lpips"].append(self.lpips(colors_p, pixels_p))
+                desc += f"PSNR={metrics['psnr'][-1]}| SSIM={metrics['ssim'][-1]}| LPIPS={metrics['lpips'][-1]}| "
+
+            pbar.update(1)
+        pbar.close()
 
         if world_rank == 0:
             ellipse_time /= len(self.testloader)
@@ -708,6 +718,7 @@ def main(cfg: Config):
         ]
         for k in runner.splats.keys():
             runner.splats[k].data = torch.cat([ckpt["splats"][k] for ckpt in ckpts])
+        runner.decoder.load_state_dict(ckpts[0]["decoder"])
         step = ckpts[0]["step"]
         runner.eval(step=step)
 
