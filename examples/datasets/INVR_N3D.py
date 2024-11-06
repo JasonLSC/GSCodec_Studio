@@ -14,12 +14,12 @@ from pycolmap import SceneManager
 try:
     from helper.STG.dataset_readers import sceneLoadTypeCallbacks
     from helper.STG.camera_utils import camera_to_JSON, cameraList_from_camInfosv2
-    from helper.STG.general_utils import PILtoTorch
+    from helper.STG.general_utils import PILtoTorch, PILtoTorch_new
     from helper.STG.time_utils import timer, timeblock
 except:
     from examples.helper.STG.dataset_readers import sceneLoadTypeCallbacks
     from examples.helper.STG.camera_utils import camera_to_JSON, cameraList_from_camInfosv2
-    from examples.helper.STG.general_utils import PILtoTorch
+    from examples.helper.STG.general_utils import PILtoTorch, PILtoTorch_new
     from examples.helper.STG.time_utils import timer, timeblock
 
 # reference to STG's scene __init__.py
@@ -191,7 +191,7 @@ class Dataset(torch.utils.data.Dataset):
         for globalid, cami, finfo in frame_infos:
             resolution = (int(finfo.width / scale), int(finfo.height / scale))
             
-            images.append(PILtoTorch(self.fetch_image(finfo.image_path), resolution).permute(1,2,0))
+            images.append(PILtoTorch_new(self.fetch_image(finfo.image_path), resolution).permute(1,2,0))
             image_paths.append(finfo.image_path)
             camtoworlds.append(torch.from_numpy(self.camtoworld[globalid]))
             timesteps.append(tid/len(self.scene_by_t))

@@ -15,6 +15,8 @@ from datetime import datetime
 import numpy as np
 import random
 from torchvision import transforms
+from PIL import Image
+import torchvision.transforms as T
 
 from .time_utils import timer
 
@@ -68,6 +70,22 @@ def PILtoTorch(pil_image, resolution):
         return resized_image.permute(2, 0, 1)
     else:
         return resized_image.unsqueeze(dim=-1).permute(2, 0, 1)
+
+
+def PILtoTorch_new(pil_image: Image.Image, resolution: tuple) -> torch.Tensor:
+    # 使用 torchvision.transforms 来处理图像的大小调整和转换为 Tensor
+    transform = T.Compose([
+        T.Resize((resolution[1], resolution[0])),  # 调整图像大小
+        T.ToTensor()           # 转换为范围 [0, 1] 的 Tensor，并调整通道顺序为 (C, H, W)
+    ])
+    
+    tensor_image = transform(pil_image)
+
+    # 检查是否是单通道图像（灰度图像），如果是，扩展维度以适应 RGB 模型
+    if tensor_image.shape[0] == 1:  # 形状是 (1, H, W)
+        tensor_image = tensor_image.expand(3, -1, -1)  # 扩展为 (3, H, W)
+
+    return tensor_image
 
 def get_expon_lr_func(
     lr_init, lr_final, lr_delay_steps=0, lr_delay_mult=1.0, max_steps=1000000
