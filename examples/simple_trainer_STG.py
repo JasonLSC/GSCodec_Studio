@@ -6,9 +6,10 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from collections import defaultdict
-from typing import Dict, List, Literal, Optional, Tuple, Union
+from typing import Dict, List, Literal, Optional, Tuple, Union, ContextManager
 import yaml
 import tyro
 import tqdm
@@ -27,12 +28,53 @@ from helper.STG.helper_model import getcolormodel, trbfunction
 from utils import AppearanceOptModule, CameraOptModule, knn, rgb_to_sh, set_random_seed
 
 from fused_ssim import fused_ssim
-from operator import itemgetter
 
-from gsplat.compression import PngCompression
+from gsplat.compression import PngCompression, STGPngCompression
 from gsplat.rendering import rasterization
 from gsplat.strategy.STG_Strategy import STG_Strategy # import densification and pruning strategy that fits STG model
 from gsplat.compression_simulation import STGCompressionSimulation
+
+class ProfilerConfig:
+    def __init__(self):
+        self.enabled = False
+        self.activities = [
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ]
+        
+        # 基础配置
+        self.wait = 4900      # 开始记录前等待的步数
+        self.warmup = 50    # 预热步数
+        self.active = 30_000    # 实际分析的步数
+        # self.repeat = 2    # 重复次数
+        # self.skip_first = 10  # 跳过前N步（可选）
+        
+        # 创建schedule
+        self.schedule = self._create_schedule()
+        
+        # 其他profiler设置
+        self.on_trace_ready = torch.profiler.tensorboard_trace_handler('./log/profiler')
+        self.record_shapes = True
+        self.profile_memory = True
+        self.with_stack = True
+    
+    def _create_schedule(self):
+
+        return torch.profiler.schedule(
+            wait=self.wait,
+            warmup=self.warmup,
+            active=self.active,
+            # repeat=self.repeat,
+            # skip_first=self.skip_first
+        )
+    
+    def update_schedule(self, **kwargs):
+        """动态更新schedule参数"""
+        for key, value in kwargs.items():
+            if hasattr(self, key):
+                setattr(self, key, value)
+        self.schedule = self._create_schedule()
+
 
 @dataclass
 class Config:
@@ -69,8 +111,8 @@ class Config:
     antialiased: bool = False
     duration: int = 50 # 20 # number of frames to train
     ssim_lambda: float = 0.2 # Weight for SSIM loss
-    save_steps: List[int] = field(default_factory=lambda: [3000, 7_000, 15_000, 30_000]) # Steps to save the model
-    eval_steps: List[int] = field(default_factory=lambda: [3_000, 7_000, 15_000, 30_000]) # Steps to evaluate the model # 7_000, 30_000
+    save_steps: List[int] = field(default_factory=lambda: [i for i in range(9_000, 30_001, 3_000)]) # Steps to save the model
+    eval_steps: List[int] = field(default_factory=lambda: [i for i in range(9_000, 30_001, 3_000)]) # Steps to evaluate the model # 7_000, 30_000
     # eval_steps: List[int] = field(default_factory=lambda: [1_000, 2_000, 3_000, 4_000, 5_000, 6_000, 7_000, 25_000, 30_000])
     # Number of densification
     desicnt: int = 6 # default: 6
@@ -90,9 +132,14 @@ class Config:
     ckpt: Optional[List[str]] = None # Serve as checkpoint, Same as "start_checkpoint" in STG
     lpips_net: str = "alex" # "alex" or "vgg"
 
+    # densification strategy
+    # strategy: Union[STG_Strategy] = field(
+    #     default_factory=DefaultStrategy
+    # )    
+
     # compression 
     # Name of compression strategy to use
-    compression: Optional[Literal["png"]] = None
+    compression: Optional[Literal["png", "stg"]] = None
 
     # Enable profiler
     profiler_enabled: bool = False
@@ -100,19 +147,32 @@ class Config:
     # Enable compression simulation
     compression_sim: bool = False
     # Name of quantization simulation strategy to use
-    quantization_sim: Optional[Literal["round", "noise", "vq"]] = None
-
+    quantization_sim_type: Optional[Literal["round", "noise", "vq"]] = None
     # Enable entropy model
     entropy_model_opt: bool = False
     # Bit-rate distortion trade-off parameter
     rd_lambda: float = 1e-2 # default: 1e-2
     # Steps to enable entropy model into training pipeline
-    entropy_steps: Dict[str, int] = field(default_factory=lambda: {"means": -1, "quats": 10_000, "scales": 10_000, "opacities": 10_000, "sh0": 20_000, "shN": 10_000})
+    entropy_steps: Dict[str, int] = field(default_factory=lambda: {"means": -1,
+                                                                    "scales": 7000,
+                                                                    "quats": 7000,
+                                                                    "opacities": -1,
+                                                                    "trbf_center": -1,
+                                                                    "trbf_scale": -1,
+                                                                    "motion": -1, # [N, 9]
+                                                                    "omega": -1, # [N, 4]
+                                                                    "colors": 7000,
+                                                                    "features_dir": 7000,
+                                                                    "features_time": 7000,})    
 
+    
     # Enable shN adaptive mask
     shN_ada_mask_opt: bool = False
     # Steps to enable shN adaptive mask
     ada_mask_steps: int = 10_000
+
+    # Enable torch.autograd.detect_anomaly ?
+    enable_autograd_detect_anomaly: bool = False
     
 
 def create_splats_with_optimizers(
@@ -146,7 +206,6 @@ def create_splats_with_optimizers(
     scales = torch.log(dist_avg * init_scale).unsqueeze(-1).repeat(1, 3)  # [N, 3]
     
     # Didn't introduce world_rank and world_size 
-    
     N = points.shape[0]
     # quats = torch.rand((N, 4))  # [N, 4]
     quats = torch.zeros((N, 4))
@@ -159,8 +218,6 @@ def create_splats_with_optimizers(
     trbf_center = times.contiguous() 
     motion = torch.zeros((N, 9))
     omega = torch.zeros((N, 4))
-    
-    # rgbdecoder = getcolormodel()
     
     params = [
         # name, value, lr
@@ -188,12 +245,11 @@ def create_splats_with_optimizers(
         # features will be used for appearance and view-dependent shading
         # The following params' lr are not tested
         features_dir = torch.rand(N, feature_dim)  # [N, feature_dim]
-        params.append(("features_dir", torch.nn.Parameter(colors), 2.5e-3))
-        # params.append(("features_dir", torch.nn.Parameter(features_dir), 2.5e-3))
-        features_time = torch.rand(N, feature_dim)  # [N, feature_dim]
+        params.append(("features_dir", torch.nn.Parameter(colors), 2.5e-3)) # TODO: Why use color rather than features_dir?
+        params.append(("colors", torch.nn.Parameter(colors), 2.5e-3)) # feature base 
+
+        features_time = torch.zeros(N, feature_dim)  # [N, feature_dim]
         params.append(("features_time", torch.nn.Parameter(features_time), 2.5e-3)) 
-        # colors = torch.logit(rgbs)  # [N, 3]
-        params.append(("colors", torch.nn.Parameter(colors), 2.5e-3)) # feature base # inf not in here?
     
     
     splats = torch.nn.ParameterDict({n: v for n, v, _ in params}).to(device)
@@ -218,7 +274,9 @@ def create_splats_with_optimizers(
 class Runner:
     """Engine for training and testing."""
     def __init__(self, cfg: Config) -> None:
-        torch.autograd.set_detect_anomaly(True)
+        # only enable when debug!!
+        if cfg.enable_autograd_detect_anomaly:
+            torch.autograd.set_detect_anomaly(True)
         
         self.cfg = cfg
         # Write cfg file: Skipped
@@ -316,10 +374,30 @@ class Runner:
         if cfg.compression is not None:
             if cfg.compression == "png":
                 self.compression_method = PngCompression()
+            elif cfg.compression == "stg":
+                self.compression_method = STGPngCompression()
             else:
                 raise ValueError(f"Unknown compression strategy: {cfg.compression}")
 
+        if cfg.compression_sim:
+            # TODO: bad impl. 
+            # cap_max = cfg.strategy.cap_max if cfg.strategy.cap_max is not None else None
+            self.compression_sim_method = STGCompressionSimulation(cfg.quantization_sim_type,
+                                                    cfg.entropy_model_opt, 
+                                                    cfg.entropy_steps, 
+                                                    self.device, 
+                                                    cfg.shN_ada_mask_opt,
+                                                    cfg.ada_mask_steps,)
+            if cfg.entropy_model_opt:
+                selected_key = min((k for k, v in cfg.entropy_steps.items() if v >= 0), key=lambda k: cfg.entropy_steps[k])
+                self.entropy_min_step = cfg.entropy_steps[selected_key]
         
+        # Profiler
+        self.profiler: Optional[torch.profiler.profile] = None
+        self.profiler_config = ProfilerConfig()
+        if cfg.profiler_enabled:
+            self.profiler_config.enabled = True
+
         # Ignored initializing pose optimization
         # Ignored initializing appearance optimization
         # Ignored bilateral grid initialization
@@ -342,7 +420,25 @@ class Runner:
         
         # Viewer
         # TODO Viewer should proceed here, according to GSplat
-        
+
+    def get_profiler(self, tb_writer) -> ContextManager:
+        if self.profiler_config.enabled:
+            return torch.profiler.profile(
+                activities=self.profiler_config.activities,
+                schedule=self.profiler_config.schedule,
+                # on_trace_ready=self.profiler_config.on_trace_ready, 
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(tb_writer.log_dir),
+                record_shapes=self.profiler_config.record_shapes,
+                profile_memory=self.profiler_config.profile_memory,
+                with_stack=self.profiler_config.with_stack
+            )
+        return nullcontext()
+
+    def step_profiler(self):
+        """step profiler"""
+        if self.profiler is not None:
+            self.profiler.step()
+
     def rasterize_splats(
         self,
         timestamp: float, 
@@ -354,20 +450,39 @@ class Runner:
         camtoworld,
         **kwargs,
     ) -> Tuple[Tensor, Tensor, Dict]:
-        # preprocess splats data
-        means = self.splats["means"]  # [N, 3]
-        quats = self.splats["quats"]  # [N, 4]
-        scales = torch.exp(self.splats["scales"])  # [N, 3]
-        opacities = torch.sigmoid(self.splats["opacities"])  # [N,]
+        if not self.cfg.compression_sim:
+            # preprocess splats data
+            means = self.splats["means"]  # [N, 3]
+            quats = self.splats["quats"]  # [N, 4]
+            scales = torch.exp(self.splats["scales"])  # [N, 3]
+            opacities = torch.sigmoid(self.splats["opacities"])  # [N,]
 
-        trbfcenter = self.splats["trbf_center"] # [N, 1]
-        trbfscale = self.splats["trbf_scale"] # [N, 1]
+            trbfcenter = self.splats["trbf_center"] # [N, 1]
+            trbfscale = self.splats["trbf_scale"] # [N, 1]
+            
+            motion = self.splats["motion"] # [N, 9]
+            omega = self.splats["omega"] # [N, 4]
+            feature_color = self.splats["colors"] # [N, 3] 
+            feature_dir = self.splats["features_dir"] # [N, 3]
+            feature_time = self.splats["features_time"] # [N, 3]    
+        else:
+            # preprocess splats data
+            means = self.comp_sim_splats["means"]  # [N, 3]
+            quats = self.comp_sim_splats["quats"]  # [N, 4]
+            scales = torch.exp(self.comp_sim_splats["scales"])  # [N, 3]
+            opacities = torch.sigmoid(self.comp_sim_splats["opacities"])  # [N,]
+
+            trbfcenter = self.comp_sim_splats["trbf_center"] # [N, 1]
+            trbfscale = self.comp_sim_splats["trbf_scale"] # [N, 1]
+            
+            motion = self.comp_sim_splats["motion"] # [N, 9]
+            omega = self.comp_sim_splats["omega"] # [N, 4]
+            feature_color = self.comp_sim_splats["colors"] # [N, 3] 
+            feature_dir = self.comp_sim_splats["features_dir"] # [N, 3]
+            feature_time = self.comp_sim_splats["features_time"] # [N, 3]    
+        
+
         pointtimes = torch.ones((means.shape[0],1), dtype=means.dtype, requires_grad=False, device="cuda") + 0 # 
-        motion = self.splats["motion"] # [N, 9]
-        omega = self.splats["omega"] # [N, 4]
-        feature_color = self.splats["colors"] # [N, 3] 
-        feature_dir = self.splats["features_dir"] # [N, 3]
-        feature_time = self.splats["features_time"] # [N, 3]    
         timestamp = timestamp
         
         trbfdistanceoffset = timestamp * pointtimes - trbfcenter
@@ -469,148 +584,222 @@ class Runner:
         # )
         # trainloader_iter = iter(trainloader)
         
-        # Training loop.
-        global_tic = time.time()
-        pbar = tqdm.tqdm(range(init_step, max_steps))
-        step = 0
-        for batch in self.trainloader:
-            step += 1
-            pbar.update(1)
-            if step > max_steps:
-                pbar.close()
-                break
-            
-            # get batch data
-            pixels = batch["image"][0].to(device)
-            Ks, rays, camtoworld = batch["K"][0].to(device), batch["ray"][0].to(device), batch["camtoworld"][0].to(device)
-            timestamp = batch['timestamp'][0].to(device).to(torch.float32)
-            num_views, height, width, _ = pixels.shape
+        with self.get_profiler(self.writer) as prof:
+            self.profiler = prof if self.profiler_config.enabled else None
 
-            # compression simulation
+            # Training loop.
+            global_tic = time.time()
+            pbar = tqdm.tqdm(range(init_step, max_steps))
+            step = 0
+            for batch in self.trainloader:
+                step += 1
+                pbar.update(1)
+                if step > max_steps:
+                    pbar.close()
+                    break
+                
+                # get batch data
+                pixels = batch["image"][0].to(device)
+                Ks, rays, camtoworld = batch["K"][0].to(device), batch["ray"][0].to(device), batch["camtoworld"][0].to(device)
+                timestamp = batch['timestamp'][0].to(device).to(torch.float32)
+                num_views, height, width, _ = pixels.shape
 
-            
-            # forward
-            renders, alphas, info = self.rasterize_splats(
-                # R=R,
-                # T=T,
-                timestamp=timestamp, # [C]
-                Ks=Ks, # [C, 3, 3]
-                width=width,
-                height=height,
-                basicfunction=trbfunction,
-                rays=rays, # [C, 6, H, W]
-                camtoworld=camtoworld, # [C, 4, 4]
-                # batch_size=cfg.batch_size,
-            )
+                # compression simulation
+                if cfg.compression_sim:
+                    self.comp_sim_splats, self.esti_bits_dict = self.compression_sim_method.simulate_compression(self.splats, step)
+                
+                # forward
+                renders, alphas, info = self.rasterize_splats(
+                    # R=R,
+                    # T=T,
+                    timestamp=timestamp, # [C]
+                    Ks=Ks, # [C, 3, 3]
+                    width=width,
+                    height=height,
+                    basicfunction=trbfunction,
+                    rays=rays, # [C, 6, H, W]
+                    camtoworld=camtoworld, # [C, 4, 4]
+                    # batch_size=cfg.batch_size,
+                )
 
-            if renders.shape[-1] == 4:
-                colors, depths = renders[..., 0:3], renders[..., 3:4]
-            else:
-                colors, depths = renders, None
-            
-            # Densification and Pruning preprocess
-            self.strategy.step_pre_backward(
-                params=self.splats,
-                optimizers=self.optimizers,
-                state=self.strategy_state,
-                step=step,
-                info=info,
-            )
-            
-            # loss
-            l1loss = F.l1_loss(colors, pixels)
-            ssimloss = 1.0 - fused_ssim(
-                colors.permute(0, 3, 1, 2), pixels.permute(0, 3, 1, 2), padding="valid"
-            )
-            loss = l1loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda  
-            
-            loss.backward()
-            desc = f"loss={loss.item():.3f}| "
-            pbar.set_description(desc)
-            
-            # write images (gt and render); output L1 difference map; Only plot the first image in one batch
-            if world_rank == 0 and step in cfg.save_steps:
-                canvas = torch.cat([pixels[0:1,...], colors[0:1,...]], dim=2).detach().cpu().numpy()
-                canvas = canvas.reshape(-1, *canvas.shape[2:])
-                imageio.imwrite(
-                    f"{self.render_dir}/train_step{step}.png",
-                    (canvas * 255).astype(np.uint8),
-                )
-                difference = abs(colors[0:1,...] - pixels[0:1,...]).squeeze().detach().cpu().numpy()
-                imageio.imwrite(
-                    f"{self.render_dir}/difference_map/train_step{step}.png",
-                    (difference * 255).astype(np.uint8),
-                )
-          
-            # TensorBoard
-            if world_rank == 0 and cfg.tb_every > 0 and step % cfg.tb_every == 0:
-                mem = torch.cuda.max_memory_allocated() / 1024**3
-                self.writer.add_scalar("train/loss", loss.item(), step)
-                self.writer.add_scalar("train/l1loss", l1loss.item(), step)
-                self.writer.add_scalar("train/ssimloss", ssimloss.item(), step)
-                self.writer.add_scalar("train/num_GS", len(self.splats["means"]), step)
-                # self.writer.add_histogram("train/means_GS", self.splats["means"], step)
-                self.writer.add_scalar("train/mem", mem, step)
-                self.writer.flush()
-            
-            # save checkpoint before updating the model
-            if step in [i - 1 for i in cfg.save_steps] or step == max_steps - 1:
-                # train log
-                mem = torch.cuda.max_memory_allocated() / 1024**3
-                stats = {
-                    "mem": mem,
-                    "ellipse_time": time.time() - global_tic,
-                    "num_GS": len(self.splats["means"]),
-                }
-                print("Step: ", step, stats)
-                with open(
-                    f"{self.stats_dir}/train_step{step:04d}_rank{self.world_rank}.json",
-                    "w",
-                ) as f:
-                    json.dump(stats, f)
-                # save checkpoint
-                data = {"step": step, 
-                        "splats": self.splats.state_dict(),
-                        "decoder": self.decoder.state_dict()}
-                torch.save(
-                    data, f"{self.ckpt_dir}/ckpt_{step}_rank{self.world_rank}.pt"
-                )
-            
-            # Densification and Pruning proceed here
-            if isinstance(self.strategy, STG_Strategy):
-                flag = self.strategy.step_post_backward(
+                if renders.shape[-1] == 4:
+                    colors, depths = renders[..., 0:3], renders[..., 3:4]
+                else:
+                    colors, depths = renders, None
+                
+                # Densification and Pruning preprocess
+                self.strategy.step_pre_backward(
                     params=self.splats,
                     optimizers=self.optimizers,
                     state=self.strategy_state,
                     step=step,
                     info=info,
-                    packed=cfg.packed,
-                    flag=flag,
-                    desicnt=cfg.desicnt,
-                    maxbounds=self.maxbounds,
-                    minbounds=self.minbounds,
                 )
-            else:
-                assert False, "Invalid strategy!" 
                 
-            # optimize
-            for optimizer in self.optimizers.values():
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-            self.decoder_optimizer.step()
-            self.decoder_optimizer.zero_grad(set_to_none=True)
-                
-            # eval the full set
-            if step in [i - 1 for i in cfg.eval_steps]:
-                self.eval(step)
-                # self.render_traj(step)
+                # loss
+                l1loss = F.l1_loss(colors, pixels)
+                ssimloss = 1.0 - fused_ssim(
+                    colors.permute(0, 3, 1, 2), pixels.permute(0, 3, 1, 2), padding="valid"
+                )
+                loss = l1loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda  
 
-            # run compression
-            # TODO
+                # entropy constraint
+                if cfg.entropy_model_opt and step>self.entropy_min_step:
+                    total_esti_bits = 0
+                    for n, n_step in cfg.entropy_steps.items():
+                        if step > n_step and self.esti_bits_dict[n] is not None:
+                            # maybe give different params with different weights
+                            total_esti_bits += torch.sum(self.esti_bits_dict[n]) / self.esti_bits_dict[n].numel()
+                        # else:
+                        #     total_esti_bits += 0
+
+                    loss = (
+                        loss
+                        + cfg.rd_lambda * total_esti_bits
+                    )
+                
+                # tmp workaround
+                loss_show = loss.detach().cpu()
+
+                loss.backward()
+
+                desc = f"loss={loss_show.item():.3f}| "
+                pbar.set_description(desc)
+                
+                # write images (gt and render); output L1 difference map; Only plot the first image in one batch
+                if world_rank == 0 and step in cfg.save_steps:
+                    canvas = torch.cat([pixels[0:1,...], colors[0:1,...]], dim=2).detach().cpu().numpy()
+                    canvas = canvas.reshape(-1, *canvas.shape[2:])
+                    imageio.imwrite(
+                        f"{self.render_dir}/train_step{step}.png",
+                        (canvas * 255).astype(np.uint8),
+                    )
+                    difference = abs(colors[0:1,...] - pixels[0:1,...]).squeeze().detach().cpu().numpy()
+                    imageio.imwrite(
+                        f"{self.render_dir}/difference_map/train_step{step}.png",
+                        (difference * 255).astype(np.uint8),
+                    )
             
-            # Viewer Skipped
-            # TODO
-               
+                # TensorBoard
+                if world_rank == 0 and cfg.tb_every > 0 and step % cfg.tb_every == 0:
+                    mem = torch.cuda.max_memory_allocated() / 1024**3
+                    self.writer.add_scalar("train/loss", loss.item(), step)
+                    self.writer.add_scalar("train/l1loss", l1loss.item(), step)
+                    self.writer.add_scalar("train/ssimloss", ssimloss.item(), step)
+                    self.writer.add_scalar("train/num_GS", len(self.splats["means"]), step)
+                    # self.writer.add_histogram("train/means_GS", self.splats["means"], step)
+                    self.writer.add_scalar("train/mem", mem, step)
+                    # if cfg.entropy_model_opt and step>self.entropy_min_step:
+                    #     self.writer.add_histogram("train_hist/quats", self.splats["quats"], step)
+                    #     # self.writer.add_histogram("train_hist/scales", self.splats["scales"], step)
+                    #     # self.writer.add_histogram("train_hist/opacities", self.splats["opacities"], step)
+                    #     self.writer.add_histogram("train_hist/colors", self.splats["colors"], step)
+                    #     self.writer.add_histogram("train_hist/features_dir", self.splats["features_dir"], step)
+                    #     self.writer.add_histogram("train_hist/features_time", self.splats["features_time"], step)
+                    #     if total_esti_bits > 0:
+                    #         self.writer.add_scalar("train/bpp_loss", total_esti_bits.item(), step)
+                    self.writer.flush()
+                
+                # save checkpoint before updating the model
+                if step in [i - 1 for i in cfg.save_steps] or step == max_steps - 1:
+                    # train log
+                    mem = torch.cuda.max_memory_allocated() / 1024**3
+                    stats = {
+                        "mem": mem,
+                        "ellipse_time": time.time() - global_tic,
+                        "num_GS": len(self.splats["means"]),
+                    }
+                    print("Step: ", step, stats)
+                    with open(
+                        f"{self.stats_dir}/train_step{step:04d}_rank{self.world_rank}.json",
+                        "w",
+                    ) as f:
+                        json.dump(stats, f)
+
+                    # save checkpoint
+                    data = {"step": step, 
+                            "splats": self.splats.state_dict(),
+                            "decoder": self.decoder.state_dict()}
+                    torch.save(
+                        data, f"{self.ckpt_dir}/ckpt_{step}_rank{self.world_rank}.pt"
+                    )
+                
+                # Densification and Pruning proceed here
+                if isinstance(self.strategy, STG_Strategy):
+                    flag = self.strategy.step_post_backward(
+                        params=self.splats,
+                        optimizers=self.optimizers,
+                        state=self.strategy_state,
+                        step=step,
+                        info=info,
+                        packed=cfg.packed,
+                        flag=flag,
+                        desicnt=cfg.desicnt,
+                        maxbounds=self.maxbounds,
+                        minbounds=self.minbounds,
+                    )
+                else:
+                    assert False, "Invalid strategy!" 
+                    
+                # optimize
+                for optimizer in self.optimizers.values():
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+                self.decoder_optimizer.step()
+                self.decoder_optimizer.zero_grad(set_to_none=True)
+                # (optional) entropy model params. optimize
+                if cfg.entropy_model_opt and step > self.entropy_min_step:
+                    for name, optimizer in self.compression_sim_method.entropy_model_optimizers.items():
+                        if optimizer is not None:
+                            optimizer.step()
+                            optimizer.zero_grad(set_to_none=True)
+                
+                self.step_profiler()
+
+                # torch.cuda.empty_cache()
+                    
+                # eval the full set
+                if step in [i - 1 for i in cfg.eval_steps]:
+                    psnr, _, _ = self.eval(step)
+
+                    # self.render_traj(step)
+
+                    # save the model with the best eval results
+                    if not hasattr(self, 'best_psnr') and step>6000:
+                        self.best_psnr = psnr
+                        data = {"step": step, 
+                                "splats": self.splats.state_dict(),
+                                "decoder": self.decoder.state_dict()}
+                        torch.save(
+                            data, f"{self.ckpt_dir}/ckpt_best_rank{self.world_rank}.pt"
+                        )
+                    elif psnr > getattr(self, 'best_psnr', float('inf')):
+                        self.best_psnr = psnr
+                        data = {"step": step, 
+                                "splats": self.splats.state_dict(),
+                                "decoder": self.decoder.state_dict()}
+                        torch.save(
+                            data, f"{self.ckpt_dir}/ckpt_best_rank{self.world_rank}.pt"
+                        )
+
+                # run compression
+                # TODO
+                
+                # Viewer Skipped
+                # TODO
+
+                # memory management
+                self.memory_manage(step)
+    
+    @torch.no_grad()
+    def memory_manage(self, step: int):
+        # delete intermeidate variables
+        del self.comp_sim_splats
+        del self.esti_bits_dict
+        if step % 200 == 0:
+            torch.cuda.empty_cache()
+
+
     @torch.no_grad()
     def eval(self, step: int, stage: str = "val"):
         """Entry for evaluation."""
@@ -653,12 +842,23 @@ class Runner:
             desc = ""
             if world_rank == 0:
                 # write GT-vs-rendered image
-                canvas = torch.cat(canvas_list, dim=2).squeeze(0).cpu().numpy()
-                canvas = (canvas * 255).astype(np.uint8)
-                imageio.imwrite(
-                    f"{self.render_dir}/{stage}_step{step}_{t_idx:04d}.png",
-                    canvas,
-                )
+                try:
+                    # new version - fpng
+                    canvas = torch.cat(canvas_list, dim=2).squeeze(0).contiguous().cpu().numpy() # fpnge needs [H,W,C]
+                    canvas = (canvas * 255).astype(np.uint8)
+                    import fpnge
+                    png = fpnge.fromNP(canvas)
+                    with open(f"{self.render_dir}/{stage}_step{step}_{t_idx:04d}.png", 'wb') as f:
+                        f.write(png)
+
+                except:
+                    # original version - imageio
+                    canvas = torch.cat(canvas_list, dim=2).squeeze(0).cpu().numpy()
+                    canvas = (canvas * 255).astype(np.uint8)
+                    imageio.imwrite(
+                        f"{self.render_dir}/{stage}_step{step}_{t_idx:04d}.png",
+                        canvas,
+                    )
 
                 # write difference image
                 # difference = abs(colors - pixels).squeeze().detach().cpu().numpy()
@@ -672,8 +872,8 @@ class Runner:
                 metrics["psnr"].append(self.psnr(colors_p, pixels_p))
                 metrics["ssim"].append(self.ssim(colors_p, pixels_p))
                 metrics["lpips"].append(self.lpips(colors_p, pixels_p))
-                desc += f"PSNR={metrics['psnr'][-1]}| SSIM={metrics['ssim'][-1]}| LPIPS={metrics['lpips'][-1]}| "
-
+                desc += f"PSNR={metrics['psnr'][-1]:.2f}| SSIM={metrics['ssim'][-1]:.4f}| LPIPS={metrics['lpips'][-1]:.4f}| "
+            pbar.set_description(desc)
             pbar.update(1)
         pbar.close()
 
@@ -699,11 +899,73 @@ class Runner:
             for k, v in stats.items():
                 self.writer.add_scalar(f"{stage}/{k}", v, step)
             self.writer.flush()
-            
+        
+        return stats['psnr'], stats['ssim'], stats['lpips']
     
     @torch.no_grad()
     def render_traj(self, step: int):
         pass
+
+    @torch.no_grad()
+    def run_compression(self, step: int):
+        """Entry for running compression."""
+        print("Running compression...")
+        world_rank = 0 # hard code for now
+
+        compress_dir = f"{cfg.result_dir}/compression/rank{world_rank}"
+        os.makedirs(compress_dir, exist_ok=True)
+        
+        # visualize param. distribution
+        self.run_param_distribution_vis(self.splats, save_dir=f"{cfg.result_dir}/visualization/raw")
+        
+        self.compression_method.compress(compress_dir, self.splats)
+        torch.save(self.decoder.state_dict(), os.path.join(compress_dir, 'decoder.pth'))
+        # self.run_param_distribution_vis(self.splats, save_dir=f"{cfg.result_dir}/visualization/log_transform")
+
+        # evaluate compression
+        splats_c = self.compression_method.decompress(compress_dir)
+        decoder_state_dict = torch.load(os.path.join(compress_dir, 'decoder.pth'))
+        
+        # visualize param. distribution
+        self.run_param_distribution_vis(splats_c, save_dir=f"{cfg.result_dir}/visualization/quant")
+
+        for k in splats_c.keys():
+            self.splats[k].data = splats_c[k].to(self.device)
+        self.decoder.load_state_dict(decoder_state_dict)
+
+        self.eval(step=step, stage="compress")
+
+    @torch.no_grad()
+    def run_param_distribution_vis(self, param_dict: Dict[str, Tensor], save_dir: str):
+        import matplotlib.pyplot as plt
+
+        os.makedirs(save_dir, exist_ok=True)
+        for param_name, value in param_dict.items():
+            
+            tensor_np = value.flatten().detach().cpu().numpy()
+            min_val, max_val = tensor_np.min(), tensor_np.max()
+
+            plt.figure(figsize=(6, 4))
+            n, bins, patches = plt.hist(tensor_np, bins=50, density=False, alpha=0.7, color='b')
+
+            for count, bin_edge in zip(n, bins):
+                plt.text(bin_edge, count, f'{int(count)}', fontsize=8, va='bottom', ha='center')
+
+            plt.annotate(f'Min: {min_val:.2f}', xy=(min_val, 0), xytext=(min_val, max(n) * 0.1),
+                        arrowprops=dict(facecolor='green', shrink=0.05), fontsize=10, color='green')
+
+            plt.annotate(f'Max: {max_val:.2f}', xy=(max_val, 0), xytext=(max_val, max(n) * 0.1),
+                        arrowprops=dict(facecolor='red', shrink=0.05), fontsize=10, color='red')
+
+            plt.title(f'{param_name} Distribution')
+            plt.xlabel('Value')
+            plt.ylabel('Density')
+
+            plt.savefig(os.path.join(save_dir, f'{param_name}.png'))
+
+            plt.close()
+        
+        print(f"Histograms saved in '{save_dir}' directory.")
 
 def inverse_sigmoid(x):
     return torch.log(x/(1-x))
@@ -721,6 +983,8 @@ def main(cfg: Config):
         runner.decoder.load_state_dict(ckpts[0]["decoder"])
         step = ckpts[0]["step"]
         runner.eval(step=step)
+        if cfg.compression is not None:
+            runner.run_compression(step=step)
 
     else:
         runner.train()
@@ -734,9 +998,12 @@ if __name__ == "__main__":
             Config(
             ),
         ),
-        "compression": (
-            "Spacetime Gaussians training and compression",
+        "compression_sim": (
+            "Spacetime Gaussians training and compression simulation",
             Config(
+                compression_sim = True,
+                quantization_sim_type = "round",
+                # Placeholders for entropy constraint and ada mask
             ),
         ),
     }

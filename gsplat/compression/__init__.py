@@ -1,1 +1,2 @@
 from .png_compression import PngCompression
+from .stg_compression import STGPngCompression

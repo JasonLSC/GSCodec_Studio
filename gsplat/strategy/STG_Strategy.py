@@ -138,7 +138,7 @@ class STG_Strategy(Strategy):
         if (
             step > self.refine_start_iter
             and step % self.refine_every == 0
-            and step % self.reset_every >= self.pause_refine_after_reset
+            # and step % self.reset_every >= self.pause_refine_after_reset
         ):
             if flag < desicnt:
                 # grow GSs
@@ -231,7 +231,7 @@ class STG_Strategy(Strategy):
 
         state["grad2d"].index_add_(0, gs_ids, grads.norm(dim=-1))
         state["count"].index_add_(
-            0, gs_ids, torch.ones_like(gs_ids, dtype=torch.float32)
+            0, gs_ids, torch.ones_like(gs_ids, dtype=torch.float32, device=gs_ids.device)
         )
         if self.refine_scale2d_stop_iter > 0:
             # Should be ideally using scatter max

@@ -101,15 +101,17 @@ class Config:
     compression_sim: bool = False
     # Name of quantization simulation strategy to use
     quantization_sim: Optional[Literal["round", "noise", "vq"]] = None
-
     # Enable entropy model
     entropy_model_opt: bool = False
     # Bit-rate distortion trade-off parameter
     rd_lambda: float = 1e-2 # default: 1e-2
     # Steps to enable entropy model into training pipeline
-    # entropy_steps: int = 10_000
-    entropy_steps: Dict[str, int] = field(default_factory=lambda: {"means": -1, "quats": 10_000, "scales": 10_000, "opacities": 10_000, "sh0": 20_000, "shN": 10_000})
-
+    entropy_steps: Dict[str, int] = field(default_factory=lambda: {"means": -1, 
+                                                                   "quats": 10_000, 
+                                                                   "scales": 10_000, 
+                                                                   "opacities": 10_000, 
+                                                                   "sh0": 20_000, 
+                                                                   "shN": 10_000})
     # Enable shN adaptive mask
     shN_ada_mask_opt: bool = False
     # Steps to enable shN adaptive mask
@@ -789,6 +791,7 @@ class Runner:
                         + cfg.rd_lambda * total_esti_bits
                     )
                 
+                # ada mask
                 if self.compression_sim_method.shN_ada_mask_opt and step > cfg.ada_mask_steps:
                     loss = loss + self.compression_sim_method.shN_ada_mask.get_sparsity_loss()
                     
