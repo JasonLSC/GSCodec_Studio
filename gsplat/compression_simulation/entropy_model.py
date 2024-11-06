@@ -254,11 +254,20 @@ class Entropy_gaussian(nn.Module):
         super(Entropy_gaussian, self).__init__()
         self.Q = Q
         self.likelihood_lower_bound = LowerBound(likelihood_bound)
-    def forward(self, x, mean, scale, Q=None):
+        self.mean = 0
+        self.scale = 1
+
+    def init_hash_embedding(self):
+        pass
+    
+    def get_mean_and_scale(self, pos):
+        pass
+    
+    def forward(self, x, Q=None):
         if Q is None:
             Q = self.Q
-        scale = torch.clamp(scale, min=1e-9)
-        m1 = torch.distributions.normal.Normal(mean, scale)
+        self.scale = torch.clamp(self.scale, min=1e-9)
+        m1 = torch.distributions.normal.Normal(self.mean, self.scale)
         lower = m1.cdf(x - 0.5*Q)
         upper = m1.cdf(x + 0.5*Q)
         likelihood = torch.abs(upper - lower)
@@ -267,23 +276,6 @@ class Entropy_gaussian(nn.Module):
         bits = -torch.log2(likelihood)
         return bits
 
-
-# class Low_bound(torch.autograd.Function):
-#     @staticmethod
-#     def forward(ctx, x):
-#         ctx.save_for_backward(x)
-#         x = torch.clamp(x, min=1e-6)
-#         return x
-
-#     @staticmethod
-#     def backward(ctx, g):
-#         x, = ctx.saved_tensors
-#         grad1 = g.clone()
-#         grad1[x < 1e-6] = 0
-#         pass_through_if = np.logical_or(
-#             x.cpu().numpy() >= 1e-6, g.cpu().numpy() < 0.0)
-#         t = torch.Tensor(pass_through_if+0.0).cuda()
-#         return grad1 * t
     
 
 def lower_bound_fwd(x: Tensor, bound: Tensor) -> Tensor:

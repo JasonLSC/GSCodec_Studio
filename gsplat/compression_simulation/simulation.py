@@ -96,12 +96,14 @@ class CompressionSimulation:
                     v_opt = torch.optim.Adam(
                         [{"params": p, "lr": 1e-4, "name": n} for n, p in v.named_parameters()]
                     )
-                    # v_opt = torch.optim.SGD(
-                    #     [{"params": p, "lr": 1e-4, "name": n} for n, p in v.named_parameters()]
-                    # )
+                elif isinstance(v, Entropy_gaussian):
+                    # TODO
+                    pass 
                 else:
                     v_opt = None
                 self.entropy_model_optimizers.update({k: v_opt})
+            
+
 
         if self.shN_ada_mask_opt:
             from .ada_mask import AnnealingMask
@@ -166,12 +168,19 @@ class CompressionSimulation:
         
         # entropy constraint
         if step > self.entropy_steps["quats"] and self.entropy_model_enable and self.entropy_model_option["quats"]:
+            if isinstance(self.entropy_models["quats"], Entropy_gaussian):
+                pass
+                
+            elif isinstance(self.entropy_models["quats"], Entropy_factorized_optimized_refactor):
                 if choose_idx is not None:
                     esti_bits = self.entropy_models["quats"](fq_out_dict["output_value"][choose_idx], fq_out_dict["q_step"])
                 else:
                     esti_bits = self.entropy_models["quats"](fq_out_dict["output_value"], fq_out_dict["q_step"])
 
-                return fq_out_dict["output_value"], esti_bits
+            else:
+                raise NotImplementedError
+
+            return fq_out_dict["output_value"], esti_bits
         else:
             return fq_out_dict["output_value"], None
 
