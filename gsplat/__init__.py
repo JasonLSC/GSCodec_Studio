@@ -23,7 +23,7 @@ from .rendering import (
     rasterization_inria_wrapper,
     rasterization_2dgs_inria_wrapper,
 )
-from .strategy import DefaultStrategy, MCMCStrategy, Strategy
+from .strategy import DefaultStrategy, MCMCStrategy, Strategy, STG_Strategy, SOM_Strategy
 from .version import __version__
 
 all = [
@@ -31,6 +31,8 @@ all = [
     "DefaultStrategy",
     "MCMCStrategy",
     "Strategy",
+    "STG_Strategy",
+    "SOM_Strategy",
     "rasterization",
     "rasterization_2dgs",
     "rasterization_inria_wrapper",
