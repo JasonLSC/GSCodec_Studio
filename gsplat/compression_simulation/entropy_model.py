@@ -69,7 +69,7 @@ class Entropy_factorized(nn.Module):
                 logits += factor * nnf.tanh(logits)
         return logits
 
-    def forward(self, x, Q=None):
+    def forward(self, x, Q=None, **kwargs):
         # x: [N, C], quantized
         if Q is None:
             Q = self.Q
@@ -151,7 +151,7 @@ class Entropy_factorized_optimized(nn.Module):
                 logits += factor * nnf.tanh(logits)
         return logits
 
-    def forward(self, x, Q=None):
+    def forward(self, x, Q=None, **kwargs):
         # x: [N, C], quantized
         if Q is None:
             Q = self.Q
@@ -196,7 +196,7 @@ class Entropy_factorized_optimized_refactor(Entropy_factorized_optimized):
         super(Entropy_factorized_optimized_refactor, self).__init__(channel, init_scale, filters, # (3, 3, 3)
                  likelihood_bound, tail_mass, optimize_integer_offset, Q)
 
-    def forward(self, x, Q=None):
+    def forward(self, x, Q=None, **kwargs):
         # x: [N, C], quantized
         if Q is None:
             Q = self.Q
@@ -249,7 +249,7 @@ class Entropy_factorized_optimized_refactor(Entropy_factorized_optimized):
         bits = -torch.log2(likelihood)
         return bits.permute(2, 1, 0).squeeze(1)
 
-from gaussian_distribution_model import hash_based_estimator
+from .gaussian_distribution_model import hash_based_estimator
 
 class Entropy_gaussian(nn.Module):
     def __init__(self, channel=3, Q=1, likelihood_bound=1e-6):
@@ -260,19 +260,21 @@ class Entropy_gaussian(nn.Module):
         self.scale = 1
 
         self.param_regressor = hash_based_estimator(channel)
-    
-    def get_mean_and_scale(self, pos):
-        self.mean, self.scale = self.param_regressor(pos)
 
-    def forward(self, x, Q=None):
-        if Q is None:
-            Q = self.Q
+    def forward(self, x, Q=None, pos=None):
+        assert pos is not None
+        assert x.size()[0] == pos.size()[0]
+
+        self.mean, self.scale = self.param_regressor(pos)
         self.scale = torch.clamp(self.scale, min=1e-9)
         m1 = torch.distributions.normal.Normal(self.mean, self.scale)
+
+        if Q is None:
+            Q = self.Q
+
         lower = m1.cdf(x - 0.5*Q)
         upper = m1.cdf(x + 0.5*Q)
         likelihood = torch.abs(upper - lower)
-        # likelihood = Low_bound.apply(likelihood)
         likelihood = self.likelihood_lower_bound(likelihood)
         bits = -torch.log2(likelihood)
         return bits

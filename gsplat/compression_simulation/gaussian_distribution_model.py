@@ -348,7 +348,7 @@ class mix_3D2D_encoding(nn.Module):
 class hash_based_estimator(nn.Module):
     def __init__(self, channel=4):
         super().__init__()
-        self.channel = 4
+        self.channel = channel
         self.hash_grid = mix_3D2D_encoding(
             n_features=2,
             resolutions_list=(18, 24, 33, 44, 59, 80, 108, 148, 201, 275, 376, 514),
