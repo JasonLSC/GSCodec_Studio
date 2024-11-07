@@ -344,3 +344,39 @@ class mix_3D2D_encoding(nn.Module):
         out_yz = self.encoding_yz(torch.cat([y_y, z_z], dim=-1))  # [..., 2*4]
         out_i = torch.cat([out_xyz, out_xy, out_xz, out_yz], dim=-1)  # [..., 56]
         return out_i
+    
+class hash_based_estimator(nn.Module):
+    def __init__(self, channel=4):
+        super().__init__()
+        self.channel = 4
+        self.hash_grid = mix_3D2D_encoding(
+            n_features=2,
+            resolutions_list=(18, 24, 33, 44, 59, 80, 108, 148, 201, 275, 376, 514),
+            log2_hashmap_size=13,
+            resolutions_list_2D=(130, 258, 514, 1026),
+            log2_hashmap_size_2D=15,
+            ste_binary=True,
+            ste_multistep=False,
+            add_noise=False,
+            Q=1,
+        )
+        self.mlp_regressor = nn.Sequential(
+            nn.Linear(self.hash_grid.output_dim, channel*5),
+            nn.ReLU(True),
+            nn.Linear(channel*5, channel*2),
+        ).cuda()
+
+        self.bound_min = -100 * torch.ones((1,3), device="cuda")
+        self.bound_max = 100 *torch.ones((1,3), device="cuda")
+    
+    def forward(self, x):
+        # x: [N, 3]
+        assert len(x.shape) == 2 and x.shape[1] == 3
+        x = (x - self.bound_min) / (self.bound_max - self.bound_min)
+        features = self.hash_grid(x)
+        out_net =  self.mlp_regressor(features)
+
+        pred_mean = out_net[:, 0:self.channel] # [N, C]
+        pred_scale = out_net[:, self.channel:2*self.channel] # [N, C]
+
+        return pred_mean, pred_scale
