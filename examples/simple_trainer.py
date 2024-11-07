@@ -104,11 +104,25 @@ class Config:
 
     # Enable entropy model
     entropy_model_opt: bool = False
+    # Define the type of entropy model
+    entropy_model_type: Literal["factorized_model", "gaussian_model"] = "factorized_model"
     # Bit-rate distortion trade-off parameter
     rd_lambda: float = 1e-2 # default: 1e-2
     # Steps to enable entropy model into training pipeline
-    # entropy_steps: int = 10_000
-    entropy_steps: Dict[str, int] = field(default_factory=lambda: {"means": -1, "quats": 10_000, "scales": 10_000, "opacities": 10_000, "sh0": 20_000, "shN": 10_000})
+    # factorized model:
+    # entropy_steps: Dict[str, int] = field(default_factory=lambda: {"means": -1, 
+    #                                                                "quats": 10_000, 
+    #                                                                "scales": 10_000, 
+    #                                                                "opacities": 10_000, 
+    #                                                                "sh0": 20_000, 
+    #                                                                "shN": 10_000})
+    # gaussian model:
+    entropy_steps: Dict[str, int] = field(default_factory=lambda: {"means": -1, 
+                                                                   "quats": -1, 
+                                                                   "scales": 10_000, 
+                                                                   "opacities": -1, 
+                                                                   "sh0": -1, 
+                                                                   "shN": -1})
 
     # Enable shN adaptive mask
     shN_ada_mask_opt: bool = False
@@ -413,6 +427,7 @@ class Runner:
             # TODO: bad impl. 
             cap_max = cfg.strategy.cap_max if cfg.strategy.cap_max is not None else None
             self.compression_sim_method = CompressionSimulation(cfg.entropy_model_opt, 
+                                                    cfg.entropy_model_type,
                                                     cfg.entropy_steps, 
                                                     self.device, 
                                                     cfg.shN_ada_mask_opt,
@@ -690,6 +705,10 @@ class Runner:
                 sh_degree_to_use = min(step // cfg.sh_degree_interval, cfg.sh_degree)
 
                 # compression simulation
+                if cfg.compression_sim and cfg.entropy_model_opt and cfg.entropy_model_type == "gaussian_model": # if hash-based gaussian model, need to estiblish bbox
+                    if step == self.entropy_min_step:
+                        self.compression_sim_method._estiblish_bbox(self.splats["means"])
+
                 if cfg.compression_sim:
                     self.comp_sim_splats, self.esti_bits_dict = self.compression_sim_method.simulate_compression(self.splats, step)
 
@@ -780,7 +799,7 @@ class Runner:
                     for n, n_step in cfg.entropy_steps.items():
                         if step > n_step and self.esti_bits_dict[n] is not None:
                             # maybe give different params with different weights
-                            total_esti_bits += torch.sum(self.esti_bits_dict[n]) / self.esti_bits_dict[n].numel()
+                            total_esti_bits += torch.sum(self.esti_bits_dict[n]) / self.esti_bits_dict[n].numel() # bpp
                         else:
                             total_esti_bits += 0
 
@@ -789,9 +808,9 @@ class Runner:
                         + cfg.rd_lambda * total_esti_bits
                     )
                 
-                if self.compression_sim_method.shN_ada_mask_opt and step > cfg.ada_mask_steps:
-                    loss = loss + self.compression_sim_method.shN_ada_mask.get_sparsity_loss()
-                    
+                if cfg.compression_sim:
+                    if self.compression_sim_method.shN_ada_mask_opt and step > cfg.ada_mask_steps:
+                        loss = loss + self.compression_sim_method.shN_ada_mask.get_sparsity_loss()
                 
                 # tmp workaround
                 loss_show = loss.detach().cpu()
@@ -831,15 +850,16 @@ class Runner:
                         canvas = torch.cat([pixels, colors], dim=2).detach().cpu().numpy()
                         canvas = canvas.reshape(-1, *canvas.shape[2:])
                         self.writer.add_image("train/render", canvas, step)
-                    if cfg.entropy_model_opt and step>self.entropy_min_step:
-                        self.writer.add_histogram("train_hist/quats", self.splats["quats"], step)
-                        self.writer.add_histogram("train_hist/scales", self.splats["scales"], step)
-                        self.writer.add_histogram("train_hist/opacities", self.splats["opacities"], step)
-                        self.writer.add_histogram("train_hist/sh0", self.splats["sh0"], step)
-                        if total_esti_bits > 0:
-                            self.writer.add_scalar("train/bpp_loss", total_esti_bits.item(), step)
-                    if self.compression_sim_method.shN_ada_mask_opt and step > cfg.ada_mask_steps:
-                        self.writer.add_scalar("train/ada_mask", self.compression_sim_method.shN_ada_mask.get_mask_ratio(), step)
+                    if cfg.compression_sim:
+                        if cfg.entropy_model_opt and step>self.entropy_min_step:
+                            self.writer.add_histogram("train_hist/quats", self.splats["quats"], step)
+                            self.writer.add_histogram("train_hist/scales", self.splats["scales"], step)
+                            self.writer.add_histogram("train_hist/opacities", self.splats["opacities"], step)
+                            self.writer.add_histogram("train_hist/sh0", self.splats["sh0"], step)
+                            if total_esti_bits > 0:
+                                self.writer.add_scalar("train/bpp_loss", total_esti_bits.item(), step)
+                        if self.compression_sim_method.shN_ada_mask_opt and step > cfg.ada_mask_steps:
+                            self.writer.add_scalar("train/ada_mask", self.compression_sim_method.shN_ada_mask.get_mask_ratio(), step)
                         
                     self.writer.add_histogram("train_hist/means", self.splats["means"], step)
                     self.writer.flush()
@@ -913,15 +933,19 @@ class Runner:
                 for scheduler in schedulers:
                     scheduler.step()
                 # (optional) entropy model params. optimize
-                if cfg.entropy_model_opt:
-                    for optimizer in self.compression_sim_method.entropy_model_optimizers.values():
-                        if optimizer is not None:
-                            optimizer.step()
-                            optimizer.zero_grad(set_to_none=True)
-                # (optional) shN adaptive mask optimize
-                if self.compression_sim_method.shN_ada_mask_opt and step > cfg.ada_mask_steps:
-                    self.compression_sim_method.shN_ada_mask_optimizer.step()
-                    self.compression_sim_method.shN_ada_mask_optimizer.zero_grad(set_to_none=True)
+                if cfg.compression_sim:
+                    if cfg.entropy_model_opt:
+                        for name, optimizer in self.compression_sim_method.entropy_model_optimizers.items():
+                            if optimizer is not None:
+                                optimizer.step()
+                                optimizer.zero_grad(set_to_none=True)
+                        for name, scheduler in self.compression_sim_method.entropy_model_schedulers.items():
+                            if scheduler is not None and step > cfg.entropy_steps[name]:
+                                scheduler.step()
+                    # (optional) shN adaptive mask optimize
+                    if self.compression_sim_method.shN_ada_mask_opt and step > cfg.ada_mask_steps:
+                        self.compression_sim_method.shN_ada_mask_optimizer.step()
+                        self.compression_sim_method.shN_ada_mask_optimizer.zero_grad(set_to_none=True)
 
                 # Run post-backward steps after backward and optimizer
                 if isinstance(self.cfg.strategy, DefaultStrategy):
