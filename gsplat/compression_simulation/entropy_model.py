@@ -249,16 +249,26 @@ class Entropy_factorized_optimized_refactor(Entropy_factorized_optimized):
         bits = -torch.log2(likelihood)
         return bits.permute(2, 1, 0).squeeze(1)
 
+from gaussian_distribution_model import hash_based_estimator
+
 class Entropy_gaussian(nn.Module):
-    def __init__(self, Q=1, likelihood_bound=1e-6):
+    def __init__(self, channel=3, Q=1, likelihood_bound=1e-6):
         super(Entropy_gaussian, self).__init__()
         self.Q = Q
         self.likelihood_lower_bound = LowerBound(likelihood_bound)
-    def forward(self, x, mean, scale, Q=None):
+        self.mean = 0
+        self.scale = 1
+
+        self.param_regressor = hash_based_estimator(channel)
+    
+    def get_mean_and_scale(self, pos):
+        self.mean, self.scale = self.param_regressor(pos)
+
+    def forward(self, x, Q=None):
         if Q is None:
             Q = self.Q
-        scale = torch.clamp(scale, min=1e-9)
-        m1 = torch.distributions.normal.Normal(mean, scale)
+        self.scale = torch.clamp(self.scale, min=1e-9)
+        m1 = torch.distributions.normal.Normal(self.mean, self.scale)
         lower = m1.cdf(x - 0.5*Q)
         upper = m1.cdf(x + 0.5*Q)
         likelihood = torch.abs(upper - lower)
@@ -285,7 +295,6 @@ class Entropy_gaussian(nn.Module):
 #         t = torch.Tensor(pass_through_if+0.0).cuda()
 #         return grad1 * t
     
-
 def lower_bound_fwd(x: Tensor, bound: Tensor) -> Tensor:
     return torch.max(x, bound)
 
