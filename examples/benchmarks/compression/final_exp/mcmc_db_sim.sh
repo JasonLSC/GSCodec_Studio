@@ -1,28 +1,41 @@
-# ----------------- Training Setting-------------- #
-SCENE_DIR="data/tandt"
-# eval all 9 scenes for benchmarking
-SCENE_LIST="train truck" #  truck
-# SCENE_LIST="garden bicycle stump bonsai counter kitchen room treehill flowers"
+# --------------- training settings -------------------- #
+
+SCENE_DIR="data/db"
+
+SCENE_LIST="drjohnson playroom" # 
 
 # # 0.36M GSs
-# RESULT_DIR="results/benchmark_tt_mcmc_0_36M_png_compression"
+# RESULT_DIR="results/benchmark_db_mcmc_0_36M_png_compression"
 # CAP_MAX=360000
 
 # # 0.49M GSs
-# RESULT_DIR="results/benchmark_tt_mcmc_tt_0_49M_png_compression"
-# CAP_MAX=490000
+RESULT_DIR="results/benchmark_db_mcmc_0_49M_png_compression"
+CAP_MAX=490000
 
 # 1M GSs
-RESULT_DIR="results/benchmark_tt_mcmc_1M_png_compression_pipe_wo_adamask"
-CAP_MAX=1000000
+# RESULT_DIR="results/benchmark_db_mcmc_1M_png_compression"
+# CAP_MAX=1000000
 
 # # 4M GSs
-# RESULT_DIR="results/benchmark_tt_mcmc_4M_png_compression"
+# RESULT_DIR="results/benchmark_db_mcmc_4M_png_compression"
 # CAP_MAX=4000000
+
+# Override default values if provided as arguments
+# [ ! -z "$1" ] && RESULT_DIR="$1"
+# [ ! -z "$2" ] && CAP_MAX="$2"
+
+RD_LAMBDA=0.01
 
 # ----------------- Training Setting-------------- #
 
+# ----------------- Args ------------------------- #
 
+if [ ! -z "$1" ]; then
+    RD_LAMBDA="$1"
+    RESULT_DIR="results/Ours_DB_rd_lambda_${RD_LAMBDA}"
+fi
+
+# ----------------- Args ------------------------- #
 
 # ----------------- Main Job --------------------- #
 run_single_scene() {
@@ -32,17 +45,18 @@ run_single_scene() {
     echo "Running $SCENE on GPU: $GPU_ID"
 
     # train without eval
-    # CUDA_VISIBLE_DEVICES=$GPU_ID python simple_trainer.py mcmc --eval_steps -1 --disable_viewer --data_factor 1 \
-    #     --strategy.cap-max $CAP_MAX \
-    #     --data_dir $SCENE_DIR/$SCENE/ \
-    #     --result_dir $RESULT_DIR/$SCENE/ \
-    #     --compression_sim \
-    #     --entropy_model_opt \
-    #     # --shN_ada_mask_opt
-    #     # --compression png
+    CUDA_VISIBLE_DEVICES=$GPU_ID python simple_trainer.py mcmc --eval_steps -1 --disable_viewer --data_factor 1 \
+        --strategy.cap-max $CAP_MAX \
+        --data_dir $SCENE_DIR/$SCENE/ \
+        --result_dir $RESULT_DIR/$SCENE/ \
+        --compression_sim \
+        --entropy_model_opt \
+        --rd_lambda $RD_LAMBDA \
+        --shN_ada_mask_opt
+        # --opacity_reg 0.001
 
 
-    # eval: use vgg for lpips to align with other benchmarks
+    eval: use vgg for lpips to align with other benchmarks
     CUDA_VISIBLE_DEVICES=$GPU_ID python simple_trainer.py mcmc --disable_viewer --data_factor 1 \
         --strategy.cap-max $CAP_MAX \
         --data_dir $SCENE_DIR/$SCENE/ \
@@ -50,14 +64,11 @@ run_single_scene() {
         --lpips_net vgg \
         --compression png \
         --ckpt $RESULT_DIR/$SCENE/ckpts/ckpt_29999_rank0.pt
-    
+
 }
 # ----------------- Main Job --------------------- #
 
-
-
-# ----------------- Experiment Loop -------------- #
-GPU_LIST=(4 5)
+GPU_LIST=(6 7)
 GPU_COUNT=${#GPU_LIST[@]}
 
 SCENE_IDX=-1
