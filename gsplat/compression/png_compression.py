@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+from gsplat.compression.outlier_filter import filter_splats
 from gsplat.compression.sort import sort_splats
 from gsplat.utils import inverse_log_transform, log_transform
 
@@ -85,6 +86,12 @@ class PngCompression:
         # Param-specific preprocessing
         splats["means"] = log_transform(splats["means"])
         splats["quats"] = F.normalize(splats["quats"], dim=-1)
+
+        # Oulier filtering
+        outlier_filtering = True
+        if outlier_filtering:
+            # import pdb; pdb.set_trace()
+            vaild_mask, splats = filter_splats(splats)
 
         n_gs = len(splats["means"])
         n_sidelen = int(n_gs**0.5)
