@@ -39,7 +39,7 @@ results_MipNeRF_360 = {
         'gsplat_comp': [27.24, 0.808, 0.231, 14.82, None],
     },
     'Ours':{
-        'Ours-lowrate': [],
+        'Ours-lowrate': [26.75, 0.794, 0.253, 8.38, None],
         'Ours-highrate': []
     }
 }
@@ -57,7 +57,7 @@ results_Deep_Blending = {
         'SOG': [30.35, 0.909, 0.258, 16.8, None],
     },
     'gsplat_comp':{
-        'gsplat_comp': [27.24, 0.808, 0.231, 14.82, None],
+        'gsplat_comp': [29.87, 0.908, 0.263, 7.89, None],
     },
     'Ours':{
         'Ours-lowrate': [],
