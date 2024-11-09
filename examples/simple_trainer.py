@@ -110,19 +110,19 @@ class Config:
     rd_lambda: float = 1e-2 # default: 1e-2
     # Steps to enable entropy model into training pipeline
     # factorized model:
-    # entropy_steps: Dict[str, int] = field(default_factory=lambda: {"means": -1, 
-    #                                                                "quats": 10_000, 
-    #                                                                "scales": 10_000, 
-    #                                                                "opacities": 10_000, 
-    #                                                                "sh0": 20_000, 
-    #                                                                "shN": 10_000})
-    # gaussian model:
     entropy_steps: Dict[str, int] = field(default_factory=lambda: {"means": -1, 
-                                                                   "quats": -1, 
+                                                                   "quats": 10_000, 
                                                                    "scales": 10_000, 
-                                                                   "opacities": -1, 
-                                                                   "sh0": -1, 
-                                                                   "shN": -1})
+                                                                   "opacities": 10_000, 
+                                                                   "sh0": 20_000, 
+                                                                   "shN": 10_000})
+    # gaussian model:
+    # entropy_steps: Dict[str, int] = field(default_factory=lambda: {"means": -1, 
+    #                                                                "quats": -1, 
+    #                                                                "scales": 10_000, 
+    #                                                                "opacities": -1, 
+    #                                                                "sh0": -1, 
+    #                                                                "shN": -1})
 
     # Enable shN adaptive mask
     shN_ada_mask_opt: bool = False
@@ -879,7 +879,7 @@ class Runner:
                     ) as f:
                         json.dump(stats, f)
                     
-                    if cfg.shN_ada_mask_opt:
+                    if cfg.shN_ada_mask_opt and step > cfg.ada_mask_steps:
                         shN_ada_mask = self.compression_sim_method.shN_ada_mask.get_binary_mask()
                         self.splats["shN"].data = self.splats["shN"].data * shN_ada_mask
                         
@@ -895,7 +895,7 @@ class Runner:
                         else:
                             data["app_module"] = self.app_module.state_dict()
 
-                    if cfg.shN_ada_mask_opt:
+                    if cfg.shN_ada_mask_opt and step > cfg.ada_mask_steps:
                         data["shN_ada_mask"] = shN_ada_mask
 
                     torch.save(
