@@ -127,7 +127,11 @@ data
 results
 
 third_party
-gscodec
+# gscodec
 setup_gscodec.py
+Readme_GSCodec.md
+
+figs
+stats
 
 !examples/benchmarks/compression/results/

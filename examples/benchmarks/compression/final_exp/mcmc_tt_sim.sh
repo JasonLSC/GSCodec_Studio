@@ -66,7 +66,7 @@ run_single_scene() {
 
 
 # ----------------- Experiment Loop -------------- #
-GPU_LIST=(0 1)
+GPU_LIST=(5 6)
 GPU_COUNT=${#GPU_LIST[@]}
 
 SCENE_IDX=-1
