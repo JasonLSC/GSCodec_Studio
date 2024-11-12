@@ -828,8 +828,11 @@ def readColmapSceneInfo(path, images, eval, llffhold=8, multiview=False, duratio
     totalply_path = os.path.join(path, "sparse/0/points3D_total" + str(duration) + ".ply")
     
 
-    
+    # merge SfM point clouds from consecutive frames into a single .ply file
+    # pc from different frames have corresponding time index
+    # these points will be used for initialization
     if not os.path.exists(totalply_path):
+        print("Merge SfM point clouds from consecutive frames into a single .ply file")
         print("Converting point3d.bin to .ply, will happen only the first time you open the scene.")
         totalxyz = []
         totalrgb = []

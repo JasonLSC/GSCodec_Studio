@@ -11,11 +11,11 @@ for SCENE in $SCENE_LIST;
 do
     echo "Running $SCENE"
 
-    # CUDA_VISIBLE_DEVICES=1 python simple_trainer_STG.py default \
-    #     --model_path $RESULT_DIR/$SCENE/ \
-    #     --data_dir $SCENE_DIR/$SCENE/colmap_0 \
-    #     --result_dir $RESULT_DIR/$SCENE/ \
-    #     --duration $NUM_FRAME
+    CUDA_VISIBLE_DEVICES=1 python simple_trainer_STG.py default \
+        --model_path $RESULT_DIR/$SCENE/ \
+        --data_dir $SCENE_DIR/$SCENE/colmap_0 \
+        --result_dir $RESULT_DIR/$SCENE/ \
+        --duration $NUM_FRAME
     
     CUDA_VISIBLE_DEVICES=1 python simple_trainer_STG.py default \
         --model_path $RESULT_DIR/$SCENE/ \

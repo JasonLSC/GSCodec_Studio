@@ -57,25 +57,9 @@ class Parser:
             scene_info = sceneLoadTypeCallbacks["Colmap"](self.source_path, self.images_phrase, self.eval, multiview, duration=self.duration) # SceneInfo() - NamedTuple
         else:
             assert False, "Could not recognize scene type!"
-    
 
         with open(scene_info.ply_path, 'rb') as src_file, open(os.path.join(self.model_path, "input.ply") , 'wb') as dest_file:
             dest_file.write(src_file.read())
-        # json_cams = []
-        # camlist = []
-        # if scene_info.test_cameras:
-        #     camlist.extend(scene_info.test_cameras)
-        # if scene_info.train_cameras:
-        #     camlist.extend(scene_info.train_cameras)
-        # for id, cam in enumerate(camlist):
-        #     json_cams.append(camera_to_JSON(id, cam))
-        # with open(os.path.join(self.model_path, "cameras.json"), 'w') as file:
-        #     json.dump(json_cams, file, indent=2)
-            
-        # turn off in STG
-        # if shuffle:
-        #     random.shuffle(scene_info.train_cameras)  # Multi-res consistent random shuffling
-        #     random.shuffle(scene_info.test_cameras)  # Multi-res consistent random shuffling
         
         self.cameras_extent = scene_info.nerf_normalization["radius"]
         # need modification
@@ -137,6 +121,7 @@ class Dataset(torch.utils.data.Dataset):
         self.num_views = num_views
         self.parser = parser
         self.resolution_scale = self.parser.resolution_scales[0]
+        
         if split == "train":
             self.scene_info = self.parser.scene_info[1]
             self.cam_list = self.parser.train_cameras[self.resolution_scale] # actually, img_list, [[v0_fr0: v0_fr49], [v1_fr0: v1_fr49], ..., [v20_fr0: v20_fr49]]
@@ -166,8 +151,7 @@ class Dataset(torch.utils.data.Dataset):
         else:
             assert False, "Invalid split input!"
         
-        # for i in range(len(self.cam_list)):
-        #      self.cam_list[i].rays = self.cam_list[i].rays
+        self.start_frame = min(scene_by_t.keys())
         
     def __len__(self):
         return  self.fake_length if self.use_fake_length else len(self.scene_by_t)
@@ -179,7 +163,7 @@ class Dataset(torch.utils.data.Dataset):
         
     def __getitem__(self, index: int) -> Dict[str, Any]:
         tid = index % len(self.scene_by_t)
-        t_infos = self.scene_by_t[tid]
+        t_infos = self.scene_by_t[tid + self.start_frame]
         try:
             frame_infos = random.sample(t_infos, k=self.num_views)
         except: #replace
