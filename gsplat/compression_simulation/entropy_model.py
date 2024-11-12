@@ -249,7 +249,7 @@ class Entropy_factorized_optimized_refactor(Entropy_factorized_optimized):
         bits = -torch.log2(likelihood)
         return bits.permute(2, 1, 0).squeeze(1)
 
-from gaussian_distribution_model import hash_based_estimator
+from .gaussian_distribution_model import hash_based_estimator
 
 class Entropy_gaussian(nn.Module):
     def __init__(self, channel=3, Q=1, likelihood_bound=1e-6):
