@@ -81,16 +81,16 @@ class Config:
     port: int = 8080
 
     # Batch size for training. Learning rates are scaled automatically
-    batch_size: int = 8 # 2 
+    batch_size: int = 8 # 8 # 2 
     # A global factor to scale the number of training steps
     steps_scaler: float = 1.0
 
     # Number of training steps
-    max_steps: int = 15_000 # 7_000 # 30_000
+    max_steps: int = 15_000 # 30_000 # 15_000 # 7_000 # 30_000
     # Steps to evaluate the model
-    eval_steps: List[int] = field(default_factory=lambda: [1000, 2000, 3000, 4000, 5000, 6000, 7_000, 9_000, 12_000, 15_000])
+    eval_steps: List[int] = field(default_factory=lambda: [i for i in range(1_000, 15_001, 1_000)])
     # Steps to save the model
-    save_steps: List[int] = field(default_factory=lambda: [1000, 2000, 3000, 4000, 5000, 6000, 7_000, 9_000, 12_000, 15_000])
+    save_steps: List[int] = field(default_factory=lambda: [i for i in range(1_000, 15_001, 1_000)])
 
     # Initialization strategy
     init_type: str = "sfm"
@@ -171,13 +171,20 @@ class Config:
     # Save training images to tensorboard
     tb_save_image: bool = False
 
-    lpips_net: Literal["vgg", "alex"] = "alex"
+    lpips_net: Literal["vgg", "alex"] = "vgg"
     
     # Newly added for Basis & Coefs
     K_coefs: int = 16 # 10 # equals B in Eq(4)
-    model_path = "/home/czwu/oursSOM_output_21/model/flame_steak" # dir of output model
-    data_dir: str = "/data/czwu/Neural_3D_Dataset/flame_steak/colmap_0" 
-    result_dir: str = "/home/czwu/oursSOM_output_21/results/flame_steak" # Directory to save results
+    # model_path = "/home/czwu/oursSOM_output_test/model/flame_steak" # dir of output model
+    model_path = "/home/czwu/results_basisAndCoefs/model/cook_spinach_vgg"
+
+    
+    # data_dir: str = "/data/czwu/Neural_3D_Dataset/flame_steak/colmap_0" 
+    data_dir: str = "/data/czwu/neural_3d/cook_spinach/colmap_0"
+    
+    # result_dir: str = "/home/czwu/oursSOM_output_test/results/flame_steak" # Directory to save results
+    result_dir: str = "/home/czwu/results_basisAndCoefs/results/cook_spinach_vgg"
+    
     duration: int = 50 # number of frames to train
     eval: bool = True
     resolution: int = 2 #-1
@@ -960,7 +967,7 @@ class Runner:
                     "w",
                 ) as f:
                     json.dump(stats, f)
-                data = {"step": step, "splats": self.splats.state_dict()}
+                data = {"step": step, "splats": self.splats.state_dict(), "basis": self.basis.state_dict()}
                 if cfg.pose_opt:
                     if world_size > 1:
                         data["pose_adjust"] = self.pose_adjust.module.state_dict()
@@ -1045,7 +1052,7 @@ class Runner:
                 neighbor_weight = np.exp(-2000 * distances)
                 neighbor_weight = torch.tensor(neighbor_weight).to(device)
                 distances = torch.tensor(distances).to(device)
-                
+
                 self.helper_params["neighbor_index"] = knn_indices
                 self.helper_params["neighbor_weight"] = neighbor_weight
                 self.helper_params["distances"] = distances
@@ -1054,9 +1061,28 @@ class Runner:
             
 
             # eval the full set
-            if step in [i - 1 for i in cfg.eval_steps]:
-                self.eval(step)
+            if step in [i - 1 for i in cfg.eval_steps]:                
+                psnr, _, _ = self.eval(step)
+
                 # self.render_traj(step)
+
+                # save the model with the best eval results
+                if not hasattr(self, 'best_psnr') and step>1000:
+                    self.best_psnr = psnr
+                    data = {"step": step, 
+                            "splats": self.splats.state_dict(),
+                            "basis": self.basis.state_dict()}
+                    torch.save(
+                        data, f"{self.ckpt_dir}/ckpt_best_rank{self.world_rank}.pt"
+                    )
+                elif psnr > getattr(self, 'best_psnr', float('inf')):
+                    self.best_psnr = psnr
+                    data = {"step": step, 
+                            "splats": self.splats.state_dict(),
+                            "basis": self.basis.state_dict()}
+                    torch.save(
+                        data, f"{self.ckpt_dir}/ckpt_best_rank{self.world_rank}.pt"
+                    )
 
             # run compression
             # if cfg.compression is not None and step in [i - 1 for i in cfg.eval_steps]:
@@ -1187,6 +1213,8 @@ class Runner:
             for k, v in stats.items():
                 self.writer.add_scalar(f"{stage}/{k}", v, step)
             self.writer.flush()
+        
+        return stats['psnr'], stats['ssim'], stats['lpips']
 
     @torch.no_grad()
     def render_traj(self, step: int):
@@ -1320,9 +1348,11 @@ def main(local_rank: int, world_rank, world_size: int, cfg: Config):
         ]
         for k in runner.splats.keys():
             runner.splats[k].data = torch.cat([ckpt["splats"][k] for ckpt in ckpts])
+        runner.basis.load_state_dict(ckpts[0]["basis"])
         step = ckpts[0]["step"]
+        import pdb; pdb.set_trace()
         runner.eval(step=step)
-        runner.render_traj(step=step)
+        # runner.render_traj(step=step)
         if cfg.compression is not None:
             runner.run_compression(step=step)
     else:
