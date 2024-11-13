@@ -924,7 +924,7 @@ class Runner:
                         shN_ada_mask = self.compression_sim_method.shN_ada_mask.get_binary_mask()
                         self.splats["shN"].data = self.splats["shN"].data * shN_ada_mask
                         
-                    data = {"step": step, "splats": self.splats.state_dict()}
+                    data = {"step": step, "splats": self.splats.state_dict(),"decoder": self.decoder.state_dict()}
                     if cfg.pose_opt:
                         if world_size > 1:
                             data["pose_adjust"] = self.pose_adjust.module.state_dict()
@@ -1287,6 +1287,7 @@ def main(local_rank: int, world_rank, world_size: int, cfg: Config):
         ]
         for k in runner.splats.keys():
             runner.splats[k].data = torch.cat([ckpt["splats"][k] for ckpt in ckpts])
+        runner.decoder.load_state_dict(ckpts[0]["decoder"])
         step = ckpts[0]["step"]
         runner.eval(step=step)
         runner.render_traj(step=step)
