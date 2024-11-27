@@ -13,9 +13,16 @@ from gsplat.compression.outlier_filter import filter_splats
 from gsplat.compression.sort import sort_splats
 from gsplat.utils import inverse_log_transform, log_transform
 
+try:
+    import constriction
+except:
+    raise ImportError(
+        "Please install constriction with 'pip install constriction' to use ANS"
+    )
+
 
 @dataclass
-class PngCompression:
+class EntropyCodingCompression:
     """Uses quantization and sorting to compress splats into PNG files and uses
     K-means clustering to compress the spherical harmonic coefficents.
 
@@ -49,11 +56,10 @@ class PngCompression:
     def _get_compress_fn(self, param_name: str) -> Callable:
         compress_fn_map = {
             "means": _compress_png_16bit,
-            "scales": _compress_png_kbit,
+            "scales": _compress_gaussian_ans,
             "quats": _compress_png_kbit,
             "opacities": _compress_png,
-            "sh0": _compress_png_kbit,
-            # "shN": _compress_kmeans,
+            "sh0": _compress_gaussian_ans,
             "shN": _compress_masked_kmeans,
         }
         if param_name in compress_fn_map:
@@ -64,11 +70,10 @@ class PngCompression:
     def _get_decompress_fn(self, param_name: str) -> Callable:
         decompress_fn_map = {
             "means": _decompress_png_16bit,
-            "scales": _decompress_png_kbit,
-            "quats": _decompress_png_kbit,
+            "scales": _decompress_gaussian_ans,
+            "quats": _compress_png_kbit,
             "opacities": _decompress_png,
-            "sh0": _decompress_png_kbit,
-            # "shN": _decompress_kmeans,
+            "sh0": _decompress_gaussian_ans,
             "shN": _decompress_masked_kmeans,
         }
         if param_name in decompress_fn_map:
@@ -83,8 +88,8 @@ class PngCompression:
             compress_dir (str): directory to save compressed files
             splats (Dict[str, Tensor]): Gaussian splats to compress
         """
-        if entropy_models is not None:
-            raise ValueError("PngCompression should not require entropy_models")
+        if entropy_models is None:
+            raise ValueError("EntropyCodingCompression should require entropy_models")
 
         # Param-specific preprocessing
         splats["means"] = log_transform(splats["means"])
@@ -96,6 +101,7 @@ class PngCompression:
             # import pdb; pdb.set_trace()
             vaild_mask, splats = filter_splats(splats)
 
+        # Sorting
         n_gs = len(splats["means"])
         n_sidelen = int(n_gs**0.5)
         n_crop = n_gs - n_sidelen**2
@@ -108,6 +114,7 @@ class PngCompression:
         if self.use_sort:
             splats = sort_splats(splats)
 
+        # Compress
         meta = {}
         for param_name in splats.keys():
             compress_fn = self._get_compress_fn(param_name)
@@ -115,6 +122,11 @@ class PngCompression:
                 "n_sidelen": n_sidelen,
                 "verbose": self.verbose,
             }
+            if param_name in entropy_models:
+                kwargs.update({"entropy_model": entropy_models[param_name]})
+                decoded_means = self.get_decompressed_means(compress_dir)
+                kwargs.update({"decoded_means": inverse_log_transform(splats["means"])})
+
             meta[param_name] = compress_fn(
                 compress_dir, param_name, splats[param_name], **kwargs
             )
@@ -142,6 +154,16 @@ class PngCompression:
         # Param-specific postprocessing
         splats["means"] = inverse_log_transform(splats["means"])
         return splats
+    
+    def get_decompressed_means(self, compress_dir: str) -> Tensor:
+        with open(os.path.join(compress_dir, "meta.json"), "r") as f:
+            meta = json.load(f)
+        
+        decompress_fn = self._get_decompress_fn("means")
+        decoded_means = decompress_fn(compress_dir, "means", meta["means"])
+
+        decoded_means = inverse_log_transform(decoded_means)
+        return decoded_means
 
 
 def _crop_n_splats(splats: Dict[str, Tensor], n_crop: int) -> Dict[str, Tensor]:
@@ -150,7 +172,6 @@ def _crop_n_splats(splats: Dict[str, Tensor], n_crop: int) -> Dict[str, Tensor]:
     for k, v in splats.items():
         splats[k] = v[keep_indices]
     return splats
-
 
 def _compress_png(
     compress_dir: str, param_name: str, params: Tensor, n_sidelen: int, **kwargs
@@ -223,10 +244,196 @@ def _decompress_png(compress_dir: str, param_name: str, meta: Dict[str, Any]) ->
     params = params.to(dtype=getattr(torch, meta["dtype"]))
     return params
 
+def _get_prob(symbols: np.array, bitwidth: int=8) -> np.array:
+    prob_list = []
+    for i in range(symbols.shape[-1]):
+        counts = np.bincount(symbols[..., i].ravel(), minlength=2**bitwidth)
+
+        prob = counts / counts.sum()
+        prob = prob.astype(np.float32)
+
+        prob_list.append(prob)
+
+    stacked_prob_npy = np.stack(prob_list, axis=0)
+
+    return stacked_prob_npy
+
+def _categorical_ans_encode(symbols: np.array, probabilities: np.array, save_path:str):
+    num_symbols = symbols.shape[-1]
+
+    message_list = []
+    probabilities_list = []
+    model_list = []
+    for i in range(symbols.shape[0]):
+        message_list.append(symbols[i])
+        probabilities_list.append(probabilities[i])
+        model_list.append(constriction.stream.model.Categorical(probabilities[i], perfect=False))
+
+    coder = constriction.stream.stack.AnsCoder()
+    
+    # encode: 反着编
+    for i in range(symbols.shape[0]-1,-1,-1):
+        coder.encode_reverse(message_list[i], model_list[i])
+
+
+    compressed = coder.get_compressed()
+    compressed.tofile(save_path)
+    compressed = np.fromfile(save_path, dtype=np.uint32)
+
+def _compress_factorized_ans(
+    compress_dir: str, param_name: str, params: Tensor, n_sidelen: int, **kwargs
+) -> Dict[str, Any]:
+    """Compress parameters with 8-bit quantization and lossless PNG compression.
+
+    Args:
+        compress_dir (str): compression directory
+        param_name (str): parameter field name
+        params (Tensor): parameters
+        n_sidelen (int): image side length
+
+    Returns:
+        Dict[str, Any]: metadata
+    """
+
+    if torch.numel == 0:
+        meta = {
+            "shape": list(params.shape),
+            "dtype": str(params.dtype).split(".")[1],
+        }
+        return meta
+
+    mins = torch.amin(params, dim=0)
+    maxs = torch.amax(params, dim=0)
+    params_norm = (params - mins) / (maxs - mins)
+    params_norm = params_norm.detach().cpu().numpy()
+
+    symbols = (params_norm * (2**8 - 1)).round().astype(np.int32)
+    prob = _get_prob(symbols, 8)
+    np.save(os.path.join(compress_dir, f"{param_name}_prob.npy"), prob)
+    _categorical_ans_encode(symbols.transpose(), prob, os.path.join(compress_dir, f"{param_name}.bin"))
+
+    meta = {
+        "shape": list(params.shape),
+        "dtype": str(params.dtype).split(".")[1],
+        "mins": mins.tolist(),
+        "maxs": maxs.tolist(),
+    }
+    return meta
+
+
+def _decompress_factorized_ans(compress_dir: str, param_name: str, meta: Dict[str, Any]) -> Tensor:
+    """Decompress parameters from PNG file.
+
+    Args:
+        compress_dir (str): compression directory
+        param_name (str): parameter field name
+        meta (Dict[str, Any]): metadata
+
+    Returns:
+        Tensor: parameters
+    """
+    import imageio.v2 as imageio
+
+    if not np.all(meta["shape"]):
+        params = torch.zeros(meta["shape"], dtype=getattr(torch, meta["dtype"]))
+        return meta
+
+    compressed = np.fromfile(os.path.join(compress_dir, f"{param_name}.bin"), dtype=np.uint32)
+    probabilities = np.load(os.path.join(compress_dir, f"{param_name}_prob.npy")).astype(np.float32)
+
+    models = []
+    for i in range(meta["shape"][1]):
+        models.append(constriction.stream.model.Categorical(probabilities[i], perfect=False))
+    ans = constriction.stream.stack.AnsCoder(compressed)
+
+    symbols = []
+    for i in range(meta["shape"][1]):
+        symbol = ans.decode(models[i], meta["shape"][0])
+        symbols.append(symbol)
+    
+    symbols = np.stack(symbols, axis=0)
+
+    decoded_symbols = symbols.transpose()
+
+    params_norm = decoded_symbols / (2**8 - 1)
+
+    params_norm = torch.tensor(params_norm)
+    mins = torch.tensor(meta["mins"])
+    maxs = torch.tensor(meta["maxs"])
+    params = params_norm * (maxs - mins) + mins
+
+    params = params.reshape(meta["shape"])
+    params = params.to(dtype=getattr(torch, meta["dtype"]))
+    return params
+
+def _compress_gaussian_ans(
+    compress_dir: str, param_name: str, params: Tensor, entropy_model: Module, decoded_means: Tensor, **kwargs
+) -> Dict[str, Any]:
+    """Compress parameters with ANS given Gaussian entropy model.
+
+    Args:
+        compress_dir (str): compression directory
+        param_name (str): parameter field name
+        params (Tensor): parameters
+        entropy_model (Module): entropy model 
+
+    Returns:
+        Dict[str, Any]: metadata
+    """
+
+    mins = torch.amin(params, dim=0)
+    maxs = torch.amax(params, dim=0)
+
+    params_norm = (params - mins) / (maxs - mins)
+    params_norm = params_norm.detach().cpu().numpy()
+
+    symbols = (params_norm * (2**8 - 1)).round().astype(np.int32)
+
+    entropy_model = entropy_model.to("cuda")
+
+    miu, sigma = entropy_model.get_means_and_scales(decoded_means.to("cuda"))
+
+    miu_norm = ((miu - mins) / (maxs - mins) * (2**8 - 1)).detach().cpu().numpy().astype(np.float64)
+    sigma_norm = (sigma / (maxs - mins) * (2**8 - 1)).detach().cpu().numpy().astype(np.float64)
+
+    # TODO: compress embedding
+
+    # ANS
+    message, means, stds = symbols.ravel(), miu_norm.ravel(), sigma_norm.ravel()
+
+    model_family = constriction.stream.model.QuantizedGaussian(0, 255)
+    encoder = constriction.stream.stack.AnsCoder()
+    encoder.encode_reverse(message, model_family, means, stds)
+
+    # Get and print the compressed representation:
+    compressed = encoder.get_compressed()
+    compressed.tofile(os.path.join(compress_dir, f"{param_name}.bin"))
+    compressed = np.fromfile(os.path.join(compress_dir, f"{param_name}.bin"), dtype=np.uint32)
+
+    # Decode the message:
+    decoder = constriction.stream.stack.AnsCoder(compressed) # (we could also just reuse `encoder`.)
+    reconstructed = decoder.decode(model_family, means, stds)
+    # print(f"Reconstructed message: {reconstructed}")
+    assert np.all(reconstructed == message)
+
+    meta = {
+        "shape": list(params.shape),
+        "dtype": str(params.dtype).split(".")[1],
+        "mins": mins.tolist(),
+        "maxs": maxs.tolist(),
+    }
+    return meta
+
+def _decompress_gaussian_ans(
+    compress_dir: str, param_name: str, meta: Dict[str, Any]
+) -> Tensor:
+    
+    pass
+
 def _compress_png_kbit(
     compress_dir: str, param_name: str, params: Tensor, n_sidelen: int, quantization: int = 8, **kwargs
 ) -> Dict[str, Any]:
-    """Compress parameters with k-bit quantization and lossless PNG compression.
+    """Compress parameters with 8-bit quantization and lossless PNG compression.
 
     Args:
         compress_dir (str): compression directory

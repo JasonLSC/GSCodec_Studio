@@ -30,6 +30,7 @@ from fused_ssim import fused_ssim
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from typing_extensions import Literal, assert_never
 from gsplat import strategy
+from gsplat.compression.entropy_coding_compression import EntropyCodingCompression
 from gsplat.compression_simulation import simulation
 from utils import AppearanceOptModule, CameraOptModule, knn, rgb_to_sh, set_random_seed
 from lib_bilagrid import (
@@ -44,6 +45,7 @@ from gsplat.distributed import cli
 from gsplat.rendering import rasterization
 from gsplat.strategy import DefaultStrategy, MCMCStrategy
 from gsplat.compression_simulation import CompressionSimulation
+from gsplat.compression_simulation.entropy_model import Entropy_factorized_optimized_refactor, Entropy_gaussian
 
 class ProfilerConfig:
     def __init__(self):
@@ -92,7 +94,7 @@ class Config:
     # Path to the .pt files. If provide, it will skip training and run evaluation only.
     ckpt: Optional[List[str]] = None
     # Name of compression strategy to use
-    compression: Optional[Literal["png"]] = None
+    compression: Optional[Literal["png", "entropy_coding"]] = None
 
     # Enable profiler
     profiler_enabled: bool = False
@@ -118,10 +120,10 @@ class Config:
                                                                    "shN": 10_000})
     # gaussian model:
     # entropy_steps: Dict[str, int] = field(default_factory=lambda: {"means": -1, 
-    #                                                                "quats": -1, 
+    #                                                                "quats": 10_000, 
     #                                                                "scales": 10_000, 
-    #                                                                "opacities": -1, 
-    #                                                                "sh0": -1, 
+    #                                                                "opacities": 10_000, 
+    #                                                                "sh0": 20_000, 
     #                                                                "shN": -1})
 
     # Enable shN adaptive mask
@@ -420,6 +422,8 @@ class Runner:
         if cfg.compression is not None:
             if cfg.compression == "png":
                 self.compression_method = PngCompression()
+            elif  cfg.compression == "entropy_coding":
+                self.compression_method = EntropyCodingCompression()
             else:
                 raise ValueError(f"Unknown compression strategy: {cfg.compression}")
         
@@ -897,6 +901,11 @@ class Runner:
 
                     if cfg.shN_ada_mask_opt and step > cfg.ada_mask_steps:
                         data["shN_ada_mask"] = shN_ada_mask
+                    
+                    if cfg.compression_sim and cfg.entropy_model_opt and cfg.compression == "entropy_coding":
+                        for name, entropy_model in self.compression_sim_method.entropy_models.items():
+                            if entropy_model is not None:
+                                data[name+"_entropy_model"] = entropy_model.state_dict()
 
                     torch.save(
                         data, f"{self.ckpt_dir}/ckpt_{step}_rank{self.world_rank}.pt"
@@ -1032,8 +1041,9 @@ class Runner:
             canvas_list = [pixels, colors]
 
             if world_rank == 0:
-                # write images
-                canvas = torch.cat(canvas_list, dim=2).squeeze(0).cpu().numpy()
+                # write images 
+                # canvas = torch.cat(canvas_list, dim=2).squeeze(0).cpu().numpy() # side by side
+                canvas = canvas_list[1].squeeze(0).cpu().numpy() # signle image
                 canvas = (canvas * 255).astype(np.uint8)
                 imageio.imwrite(
                     f"{self.render_dir}/{stage}_step{step}_{i:04d}.png",
@@ -1074,16 +1084,18 @@ class Runner:
             self.writer.flush()
 
     @torch.no_grad()
-    def render_traj(self, step: int):
+    def render_traj(self, step: int, stage: str = "val"):
         """Entry for trajectory rendering."""
         print("Running trajectory rendering...")
         cfg = self.cfg
         device = self.device
 
-        camtoworlds_all = self.parser.camtoworlds[5:-5]
+        num_imgs = len(self.parser.camtoworlds)
+
+        camtoworlds_all = self.parser.camtoworlds[: num_imgs//2]
         if cfg.render_traj_path == "interp":
             camtoworlds_all = generate_interpolated_path(
-                camtoworlds_all, 1
+                camtoworlds_all, 6 #1
             )  # [N, 3, 4]
         elif cfg.render_traj_path == "ellipse":
             height = camtoworlds_all[:, 2, 3].mean()
@@ -1118,7 +1130,7 @@ class Runner:
         # save to video
         video_dir = f"{cfg.result_dir}/videos"
         os.makedirs(video_dir, exist_ok=True)
-        writer = imageio.get_writer(f"{video_dir}/traj_{step}.mp4", fps=30)
+        writer = imageio.get_writer(f"{video_dir}/{stage}_traj_{step}.mp4", fps=30)
         for i in tqdm.trange(len(camtoworlds_all), desc="Rendering trajectory"):
             camtoworlds = camtoworlds_all[i : i + 1]
             Ks = K[None]
@@ -1139,11 +1151,12 @@ class Runner:
             canvas_list = [colors, depths.repeat(1, 1, 1, 3)]
 
             # write images
-            canvas = torch.cat(canvas_list, dim=2).squeeze(0).cpu().numpy()
+            # canvas = torch.cat(canvas_list, dim=2).squeeze(0).cpu().numpy()
+            canvas = canvas_list[0].squeeze(0).cpu().numpy()
             canvas = (canvas * 255).astype(np.uint8)
             writer.append_data(canvas)
         writer.close()
-        print(f"Video saved to {video_dir}/traj_{step}.mp4")
+        print(f"Video saved to {video_dir}/{stage}_traj_{step}.mp4")
 
     @torch.no_grad()
     def run_compression(self, step: int):
@@ -1156,8 +1169,12 @@ class Runner:
         # import pdb; pdb.set_trace()
         self.run_param_distribution_vis(self.splats, save_dir=f"{cfg.result_dir}/visualization/raw")
         
-        self.compression_method.compress(compress_dir, self.splats)
-        # self.run_param_distribution_vis(self.splats, save_dir=f"{cfg.result_dir}/visualization/log_transform")
+        if isinstance(self.compression_method, PngCompression):
+            self.compression_method.compress(compress_dir, self.splats)
+        elif isinstance(self.compression_method, EntropyCodingCompression):
+            self.compression_method.compress(compress_dir, self.splats, self.entropy_models)
+        else:
+            raise NotImplementedError(f"The compression method is not implemented yet.")
 
         # evaluate compression
         splats_c = self.compression_method.decompress(compress_dir)
@@ -1167,6 +1184,7 @@ class Runner:
         for k in splats_c.keys():
             self.splats[k].data = splats_c[k].to(self.device)
         self.eval(step=step, stage="compress")
+        self.render_traj(step=step, stage="compress")
 
     @torch.no_grad()
     def run_param_distribution_vis(self, param_dict: Dict[str, Tensor], save_dir: str):
@@ -1199,6 +1217,21 @@ class Runner:
             plt.close()
         
         print(f"Histograms saved in '{save_dir}' directory.")
+    
+    def load_entropy_model_from_ckpt(self, ckpt: Dict, entropy_model_type: str):
+        self.entropy_models = {}
+        for name, value in ckpt.items():
+            if "_entropy_model" in name:
+                attr_name = name[:(len(name) - len("_entropy_model"))]
+                num_ch = ckpt["splats"][attr_name].shape[-1]
+                if entropy_model_type == "factorized_model":
+                    # TODO
+                    pass
+                elif entropy_model_type == "gaussian_model":
+                    entropy_model = Entropy_gaussian(channel=num_ch)
+                
+                entropy_model.load_state_dict(value)
+                self.entropy_models[attr_name] = entropy_model
 
     @torch.no_grad()
     def _viewer_render_fn(
@@ -1242,6 +1275,8 @@ def main(local_rank: int, world_rank, world_size: int, cfg: Config):
         runner.eval(step=step)
         runner.render_traj(step=step)
         if cfg.compression is not None:
+            if cfg.compression == "entropy_coding":
+                runner.load_entropy_model_from_ckpt(ckpts[0], cfg.entropy_model_type)
             runner.run_compression(step=step)
     else:
         runner.train()

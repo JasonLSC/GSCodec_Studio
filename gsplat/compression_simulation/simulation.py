@@ -103,9 +103,9 @@ class CompressionSimulation:
                 self.entropy_models = {
                     "means": None,
                     "scales": Entropy_gaussian(channel=3).to(self.device),
-                    "quats": None,
+                    "quats": Entropy_gaussian(channel=4).to(self.device),
                     "opacities": None,
-                    "sh0": None,
+                    "sh0": Entropy_gaussian(channel=3).to(self.device),
                     "shN": None
                 }
             else:

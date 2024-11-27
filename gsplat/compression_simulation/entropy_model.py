@@ -278,7 +278,12 @@ class Entropy_gaussian(nn.Module):
         likelihood = self.likelihood_lower_bound(likelihood)
         bits = -torch.log2(likelihood)
         return bits
+    
+    def get_means_and_scales(self, pos):
+        means, scales = self.param_regressor(pos)
+        scales = torch.clamp(scales, min=1e-9)
 
+        return means, scales
 
 # class Low_bound(torch.autograd.Function):
 #     @staticmethod
