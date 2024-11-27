@@ -765,7 +765,7 @@ class Runner:
                     # self.render_traj(step)
 
                     # save the model with the best eval results
-                    if not hasattr(self, 'best_psnr') and step>6000:
+                    if not hasattr(self, 'best_psnr') and step>10000:
                         self.best_psnr = psnr
                         data = {"step": step, 
                                 "splats": self.splats.state_dict(),
@@ -813,6 +813,7 @@ class Runner:
         ellipse_time = 0
         metrics = defaultdict(list)
         pbar = tqdm.tqdm(range(0, len(self.testloader)))
+        
         for t_idx, batch in enumerate(self.testloader): # t_idx
             
             Ks = batch["K"][0].float().to(device)
@@ -821,6 +822,10 @@ class Runner:
             timestamp = batch["timestamp"][0].float().to(device)
             rays = batch["ray"][0].float().to(device) 
             camtoworld = batch['camtoworld'][0].float().to(device)
+
+            # R = camtoworld.cpu().numpy()[0, :3,:3]
+            # T = torch.inverse(camtoworld).cpu().numpy()[0, :3,-1]
+            # new_rays = self.get_rays(R, T, Ks[0,0,0], Ks[0,1,1], width, height).float().to(device)
             
             torch.cuda.synchronize()
             tic = time.time()
@@ -844,11 +849,20 @@ class Runner:
                 # write GT-vs-rendered image
                 try:
                     # new version - fpng
-                    canvas = torch.cat(canvas_list, dim=2).squeeze(0).contiguous().cpu().numpy() # fpnge needs [H,W,C]
+                    # canvas = torch.cat(canvas_list, dim=2).squeeze(0).contiguous().cpu().numpy() # fpnge needs [H,W,C]
+                    # import pdb; pdb.set_trace()
+                    canvas = canvas_list[-1].squeeze(0).contiguous().cpu().numpy()
                     canvas = (canvas * 255).astype(np.uint8)
                     import fpnge
                     png = fpnge.fromNP(canvas)
                     with open(f"{self.render_dir}/{stage}_step{step}_{t_idx:04d}.png", 'wb') as f:
+                        f.write(png)
+
+                    canvas = canvas_list[0].squeeze(0).contiguous().cpu().numpy()
+                    canvas = (canvas * 255).astype(np.uint8)
+                    import fpnge
+                    png = fpnge.fromNP(canvas)
+                    with open(f"{self.render_dir}/{stage}_step{step}_{t_idx:04d}_gt.png", 'wb') as f:
                         f.write(png)
 
                 except:
@@ -902,9 +916,169 @@ class Runner:
         
         return stats['psnr'], stats['ssim'], stats['lpips']
     
+    def get_rays(self, R, T, focal_length_x, focal_length_y, width, height):
+        '''
+        R: c2w
+        T: w2c
+
+        '''
+
+        from helper.STG.graphics_utils import getWorld2View2, getProjectionMatrix, focal2fov, fov2focal
+        world_view_transform = torch.tensor(getWorld2View2(R, T)).transpose(0, 1)
+
+        FovY = focal2fov(focal_length_y, height)
+        FovX = focal2fov(focal_length_x, width)
+
+        projection_matrix = getProjectionMatrix(znear=0.01, zfar=100.0, fovX=FovX, fovY=FovY).transpose(0,1)
+        camera_center = world_view_transform.inverse()[3, :3]
+
+        
+        projectinverse = projection_matrix.T.inverse()
+        camera2wold = world_view_transform.T.inverse()
+        from kornia import create_meshgrid
+        pixgrid = create_meshgrid(height, width, normalized_coordinates=False, device="cpu")[0]
+        pixgrid = pixgrid  # H,W,
+        
+        xindx = pixgrid[:,:,0] # x 
+        yindx = pixgrid[:,:,1] # y
+    
+        from helper.STG.helper_model import pix2ndc
+        ndcy, ndcx = pix2ndc(yindx, height), pix2ndc(xindx, width)
+        ndcx = ndcx.unsqueeze(-1)
+        ndcy = ndcy.unsqueeze(-1)# * (-1.0)
+        
+        ndccamera = torch.cat((ndcx, ndcy,   torch.ones_like(ndcy) * (1.0) , torch.ones_like(ndcy)), 2) # N,4 
+
+        projected = ndccamera @ projectinverse.T 
+        diretioninlocal = projected / projected[:,:,3:] #v 
+
+
+        direction = diretioninlocal[:,:,:3] @ camera2wold[:3,:3].T 
+        rays_d = torch.nn.functional.normalize(direction, p=2.0, dim=-1)
+
+        
+        rayo = camera_center.expand(rays_d.shape).permute(2, 0, 1).unsqueeze(0)
+        rayd = rays_d.permute(2, 0, 1).unsqueeze(0)   
+
+        rays = torch.cat([rayo, rayd], dim=1)
+
+        return rays
+
+    
     @torch.no_grad()
-    def render_traj(self, step: int):
-        pass
+    def render_traj(self, step: int, stage: str = "val"):
+        """Entry for trajectory rendering."""
+        print("Running trajectory rendering...")
+
+        cfg = self.cfg
+        device = self.device
+
+        timestamps = torch.from_numpy(np.array([i/len(self.testset.scene_by_t) for i in range(len(self.testset.scene_by_t))])).float().to(device)
+        Ks = self.testset[0]["K"].float().to(device)
+        pixels = self.testset[0]["image"].float().to(device)
+        num_views, height, width, _ = pixels.shape
+
+        camtoworld = self.testset[0]["camtoworld"].float().to(device)
+
+        # from c2w to rays
+        # R = camtoworld[0, :3, :3].cpu().numpy()
+        # T = torch.inverse(camtoworld)[0, :3, -1].cpu().numpy()
+        # rays = self.get_rays(R, T, Ks[0,0,0], Ks[0,1,1], width, height).float().to(device)
+
+        # get v4, v5 for interp
+        v4_fr0_global_id = 150
+        v5_fr0_global_id = 200
+        v4_c2w = torch.from_numpy(self.trainset.camtoworld[v4_fr0_global_id])
+        v5_c2w = torch.from_numpy(self.trainset.camtoworld[v5_fr0_global_id])
+        # v4_c2w = self.trainset[200]["camtoworld"].float().to(device)
+        # v5_c2w = self.trainset[250]["camtoworld"].float().to(device)
+
+        v4_w2c = torch.inverse(v4_c2w)
+        v5_w2c = torch.inverse(v5_c2w)
+
+        def get_c2w(time, v4_w2c, v5_w2c):
+            R1 = v4_w2c[:3, :3].cpu().numpy()
+            T1 = v4_w2c[:3, -1].cpu().numpy()
+            R2 = v5_w2c[:3, :3].cpu().numpy()
+            T2 = v5_w2c[:3, -1].cpu().numpy()
+
+            from helper.STG.posetrace_utils import interpolate_camera_poses2, qvec2rotmat
+            q,t = interpolate_camera_poses2(R1, T1, R2, T2, time % 1)
+
+            R = qvec2rotmat(q) # w2c
+            T = np.array(t) # w2c
+
+            # R_T = R.transpose()
+
+            w2c = np.zeros([4,4])
+            w2c[:3, :3] = R
+            w2c[:3, -1] = T
+            w2c[3, 3] = 1
+
+            c2w = np.linalg.inv(w2c)
+
+            return c2w
+
+
+
+        video_dir = f"{cfg.result_dir}/videos"
+        os.makedirs(video_dir, exist_ok=True)
+        writer = imageio.get_writer(f"{video_dir}/{stage}_traj_{step}.mp4", fps=30)
+
+        for t_idx, timestamp in tqdm.tqdm(enumerate(timestamps), desc="Rendering trajectory"):
+
+            camtoworld = torch.from_numpy(get_c2w(timestamp.cpu().numpy(), v5_w2c, v4_w2c)).float().to(device)
+            camtoworld = camtoworld.unsqueeze(0)
+
+            R = camtoworld[0, :3, :3].cpu().numpy()
+            T = torch.inverse(camtoworld)[0, :3, -1].cpu().numpy()
+            rays = self.get_rays(R, T, Ks[0,0,0], Ks[0,1,1], width, height).float().to(device)
+
+            colors, _, _ = self.rasterize_splats(
+                timestamp=timestamp,
+                Ks=Ks,
+                width=width,
+                height=height,
+                basicfunction=trbfunction,
+                rays=rays,
+                camtoworld=camtoworld,
+            )
+
+            colors = torch.clamp(colors, 0.0, 1.0)
+            canvas_list = [pixels, colors]
+
+            # try:
+            #     # new version - fpng
+            #     # canvas = torch.cat(canvas_list, dim=2).squeeze(0).contiguous().cpu().numpy() # fpnge needs [H,W,C]
+            #     # import pdb; pdb.set_trace()
+            #     canvas = canvas_list[-1].squeeze(0).contiguous().cpu().numpy()
+            #     canvas = (canvas * 255).astype(np.uint8)
+            #     import fpnge
+            #     png = fpnge.fromNP(canvas)
+            #     with open(f"{self.render_dir}/{stage}_step{step}_{t_idx:04d}.png", 'wb') as f:
+            #         f.write(png)
+
+            #     canvas = canvas_list[0].squeeze(0).contiguous().cpu().numpy()
+            #     canvas = (canvas * 255).astype(np.uint8)
+            #     import fpnge
+            #     png = fpnge.fromNP(canvas)
+            #     with open(f"{self.render_dir}/{stage}_step{step}_{t_idx:04d}_gt.png", 'wb') as f:
+            #         f.write(png)
+
+            # except:
+            #     # original version - imageio
+            #     canvas = torch.cat(canvas_list, dim=2).squeeze(0).cpu().numpy()
+            #     canvas = (canvas * 255).astype(np.uint8)
+            #     imageio.imwrite(
+            #         f"{self.render_dir}/{stage}_step{step}_{t_idx:04d}.png",
+            #         canvas,
+            #     )
+
+            canvas = canvas_list[1].squeeze(0).cpu().numpy()
+            canvas = (canvas * 255).astype(np.uint8)
+            writer.append_data(canvas)
+        writer.close()
+        print(f"Video saved to {video_dir}/{stage}_traj_{step}.mp4")
 
     @torch.no_grad()
     def run_compression(self, step: int):
@@ -982,7 +1156,8 @@ def main(cfg: Config):
             runner.splats[k].data = torch.cat([ckpt["splats"][k] for ckpt in ckpts])
         runner.decoder.load_state_dict(ckpts[0]["decoder"])
         step = ckpts[0]["step"]
-        runner.eval(step=step)
+        runner.render_traj(step=step)
+        # runner.eval(step=step)
         if cfg.compression is not None:
             runner.run_compression(step=step)
 
