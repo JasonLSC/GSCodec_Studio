@@ -67,7 +67,7 @@ def loadCam(args, id, cam_info, resolution_scale):
                   image_name=cam_info.image_name, uid=id, data_device=args.data_device, near=cam_info.near, far=cam_info.far, timestamp=cam_info.timestamp, rayo=rays_o, rayd=rays_d)
 
 
-@timer
+# @timer
 def loadCamv2(args, id, cam_info, resolution_scale):
     orig_w, orig_h =  cam_info.width, cam_info.height
     if args.resolution in [1, 2, 4, 8]:
@@ -107,7 +107,6 @@ def loadCamv2(args, id, cam_info, resolution_scale):
     else :
         rays_o = None
         rays_d = None
-
     return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
                   FoVx=cam_info.FovX, FoVy=cam_info.FovY, 
                   image=gt_image, gt_alpha_mask=loaded_mask,

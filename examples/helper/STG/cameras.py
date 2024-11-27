@@ -104,7 +104,7 @@ class Camera(nn.Module):
             rays_d = torch.nn.functional.normalize(direction, p=2.0, dim=-1)
 
             
-            self.rayo = self.camera_center.expand(rays_d.shape).permute(2, 0, 1).unsqueeze(0)                                     #rayo.permute(2, 0, 1).unsqueeze(0)
+            self.rayo = self.camera_center.expand(rays_d.shape).permute(2, 0, 1).unsqueeze(0)
             self.rayd = rays_d.permute(2, 0, 1).unsqueeze(0)    
             
 
