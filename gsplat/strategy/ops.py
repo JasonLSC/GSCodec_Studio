@@ -106,14 +106,17 @@ def duplicate(
     """
     device = mask.device # mask: tensor  length: number of gaussians  Eg. tensor([False, False, False,  ..., False, False, False], device='cuda:0')
     sel = torch.where(mask)[0] # 取出mask为1的下标
-    # import pdb; pdb.set_trace()
+    
     def param_fn(name: str, p: Tensor) -> Tensor:
-        # 在tensor下直接concat指定下标的tensor
         # according to STG, the trbf_center attribute will randomize when its gaussian are cloning
-        if name == "trbf_center":
-            return torch.nn.Parameter(torch.cat([p, torch.rand((p[sel].shape[0],1), device="cuda")]))
-        else:
-            return torch.nn.Parameter(torch.cat([p, p[sel]]))
+        # Sicheng: in my own intuition, it is not the right way to do
+        # if name == "trbf_center":
+        #     return torch.nn.Parameter(torch.cat([p, torch.rand((p[sel].shape[0],1), device="cuda")]))
+        # else:
+        #     return torch.nn.Parameter(torch.cat([p, p[sel]]))
+
+        # Sicheng: let's just copy every attributes in 'duplicate' func.
+        return torch.nn.Parameter(torch.cat([p, p[sel]]))
 
     def optimizer_fn(key: str, v: Tensor) -> Tensor:
         return torch.cat([v, torch.zeros((len(sel), *v.shape[1:]), device=device)])
@@ -147,6 +150,7 @@ def split(
     sel = torch.where(mask)[0]
     rest = torch.where(~mask)[0]
 
+    # spatial resampling
     scales = torch.exp(params["scales"][sel])
     quats = F.normalize(params["quats"][sel], dim=-1)
     rotmats = normalized_quat_to_rotmat(quats)  # [N, 3, 3]
@@ -156,6 +160,15 @@ def split(
         scales,
         torch.randn(2, len(scales), 3, device=device),
     )  # [2, N, 3]
+
+    # temporal resampling
+    # t_scales = torch.exp(params["trbf_scale"][sel])
+    # t_samples = torch.einsum(
+    #     "ni,bni->bni",
+    #     t_scales,
+    #     torch.randn(2, len(scales), 1, device=device),
+    # ) # [2, N, 1]
+    
 
     def param_fn(name: str, p: Tensor) -> Tensor:
         repeats = [2] + [1] * (p.dim() - 1)
@@ -167,8 +180,15 @@ def split(
             new_opacities = 1.0 - torch.sqrt(1.0 - torch.sigmoid(p[sel]))
             p_split = torch.logit(new_opacities).repeat(repeats)  # [2N]
         # according to STG, the trbf_center attribute will randomize when its gaussian are cloning
-        elif name == "trbf_center":
-            p_split = torch.rand((p[sel].shape[0],1), device="cuda").repeat(repeats)
+        # elif name == "trbf_center":
+        #     p_split = torch.rand((p[sel].shape[0],1), device="cuda").repeat(repeats)
+
+        # Sicheng: resample via temporal gaussian dist.
+        # elif name == "trbf_center":
+        #     p_split = (p[sel] + t_samples).reshape(-1, 1)  # [2N, 1]
+            # import pdb; pdb.set_trace()
+        # Sicheng: do we need to resample trbf_scales?
+        # TODO: resample trbf_scales
         else:
             p_split = p[sel].repeat(repeats)
         p_new = torch.cat([p[rest], p_split])

@@ -310,7 +310,7 @@ class STGCompressionSimulation:
             "means": None,
             "scales": [-10, 2],
             "quats": [-1, 1],
-            "opacities": [-5.5, 7],
+            "opacities": [-7, 7],
             "trbf_center": None,
             "trbf_scale": None,
             "motion": None, # [N, 9]

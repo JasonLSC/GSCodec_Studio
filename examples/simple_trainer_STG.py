@@ -24,6 +24,7 @@ from torch.utils.tensorboard import SummaryWriter
 # from datasets.INVR import Dataset, Parser # This only supports preprocessed Bartender & CBA dataset
 from datasets.INVR_N3D import Parser, Dataset # This only supports preprocessed N3D Dataset
 
+from gsplat import strategy
 from helper.STG.helper_model import getcolormodel, trbfunction
 from utils import AppearanceOptModule, CameraOptModule, knn, rgb_to_sh, set_random_seed
 
@@ -31,7 +32,7 @@ from fused_ssim import fused_ssim
 
 from gsplat.compression import PngCompression, STGPngCompression
 from gsplat.rendering import rasterization
-from gsplat.strategy.STG_Strategy import STG_Strategy # import densification and pruning strategy that fits STG model
+from gsplat.strategy import STG_Strategy, Modified_STG_Strategy # import densification and pruning strategy that fits STG model
 from gsplat.compression_simulation import STGCompressionSimulation
 
 class ProfilerConfig:
@@ -135,7 +136,14 @@ class Config:
     # densification strategy
     # strategy: Union[STG_Strategy] = field(
     #     default_factory=DefaultStrategy
-    # )    
+    # )
+    strategy: Literal["STG_Strategy", "Modified_STG_Strategy"] = "STG_Strategy"
+
+    # Temporal visibility masking
+    temp_vis_mask: bool = False
+
+    # Test view
+    test_view_id: List[int] = field(default_factory=lambda: [0]) # Neu3DVideo do not need to specify, but INVR needs
 
     # compression 
     # Name of compression strategy to use
@@ -351,20 +359,39 @@ class Runner:
         
         # Densification Strategy
         # Only support one type of Densification Strategy for now
-        self.strategy = STG_Strategy(
-            verbose=True, 
-            prune_opa=cfg.prune_opa, 
-            grow_grad2d=cfg.grow_grad2d, 
-            grow_scale3d=cfg.grow_scale3d, 
-            # prune_scale3d=cfg.prune_scale3d,
-            # refine_scale2d_stop_iter=4000, # splatfacto behavior 
-            refine_start_iter=cfg.refine_start_iter, 
-            refine_stop_iter=cfg.refine_stop_iter, 
-            reset_every=cfg.reset_every,
-            refine_every=cfg.refine_every,
-            absgrad=cfg.absgrad,
-            # revised_opacity=cfg.revised_opacity,
-        )
+        if cfg.strategy == "STG_Strategy":
+            self.strategy = STG_Strategy(
+                verbose=True, 
+                prune_opa=cfg.prune_opa, 
+                grow_grad2d=cfg.grow_grad2d, 
+                grow_scale3d=cfg.grow_scale3d, 
+                # prune_scale3d=cfg.prune_scale3d,
+                # refine_scale2d_stop_iter=4000, # splatfacto behavior 
+                refine_start_iter=cfg.refine_start_iter, 
+                refine_stop_iter=cfg.refine_stop_iter, 
+                reset_every=cfg.reset_every,
+                refine_every=cfg.refine_every,
+                absgrad=cfg.absgrad,
+                pause_refine_after_reset=cfg.pause_refine_after_reset
+                # revised_opacity=cfg.revised_opacity,
+            )
+        elif cfg.strategy == "Modified_STG_Strategy":
+            self.strategy = Modified_STG_Strategy(
+                verbose=True, 
+                prune_opa=cfg.prune_opa, 
+                grow_grad2d=cfg.grow_grad2d, 
+                grow_scale3d=cfg.grow_scale3d, 
+                # prune_scale3d=cfg.prune_scale3d,
+                # refine_scale2d_stop_iter=4000, # splatfacto behavior 
+                refine_start_iter=cfg.refine_start_iter, 
+                refine_stop_iter=cfg.refine_stop_iter, 
+                reset_every=cfg.reset_every,
+                refine_every=cfg.refine_every,
+                absgrad=cfg.absgrad,
+                pause_refine_after_reset=cfg.pause_refine_after_reset,
+                temp_vis_mask=cfg.temp_vis_mask
+                # revised_opacity=cfg.revised_opacity,
+            )
         self.strategy.check_sanity(self.splats, self.optimizers)
         self.strategy_state = self.strategy.initialize_state(scene_scale=self.scene_scale)
         
@@ -448,6 +475,7 @@ class Runner:
         basicfunction, 
         rays, 
         camtoworld,
+        temp_vis_mask = None,
         **kwargs,
     ) -> Tuple[Tensor, Tensor, Dict]:
         if not self.cfg.compression_sim:
@@ -458,7 +486,7 @@ class Runner:
             opacities = torch.sigmoid(self.splats["opacities"])  # [N,]
 
             trbfcenter = self.splats["trbf_center"] # [N, 1]
-            trbfscale = self.splats["trbf_scale"] # [N, 1]
+            trbfscale = torch.exp(self.splats["trbf_scale"]) # [N, 1]
             
             motion = self.splats["motion"] # [N, 9]
             omega = self.splats["omega"] # [N, 4]
@@ -473,7 +501,7 @@ class Runner:
             opacities = torch.sigmoid(self.comp_sim_splats["opacities"])  # [N,]
 
             trbfcenter = self.comp_sim_splats["trbf_center"] # [N, 1]
-            trbfscale = self.comp_sim_splats["trbf_scale"] # [N, 1]
+            trbfscale = torch.exp(self.comp_sim_splats["trbf_scale"]) # [N, 1], log domain
             
             motion = self.comp_sim_splats["motion"] # [N, 9]
             omega = self.comp_sim_splats["omega"] # [N, 4]
@@ -481,13 +509,13 @@ class Runner:
             feature_dir = self.comp_sim_splats["features_dir"] # [N, 3]
             feature_time = self.comp_sim_splats["features_time"] # [N, 3]    
         
-
         pointtimes = torch.ones((means.shape[0],1), dtype=means.dtype, requires_grad=False, device="cuda") + 0 # 
         timestamp = timestamp
         
         trbfdistanceoffset = timestamp * pointtimes - trbfcenter
-        trbfdistance =  trbfdistanceoffset / torch.exp(trbfscale) 
-        trbfoutput = basicfunction(trbfdistance)
+        trbfdistance =  trbfdistanceoffset / (math.sqrt(2) * trbfscale)
+        trbfoutput = basicfunction(trbfdistance)           
+
         # opacity decay 
         opacity = opacities * trbfoutput.squeeze()
         
@@ -500,7 +528,18 @@ class Runner:
 
         # Calculate feature
         colors_precomp = torch.cat((feature_color, feature_dir, tforpoly * feature_time), dim=1)
-        # colors_precomp = feature_color
+
+        # Filter out unvisible splats at this timestamp. "mask == 1" means visible, otherwise unvisible.
+        if temp_vis_mask:
+            t_vis_mask = trbfoutput.squeeze() > 0.05
+            means_motion = means_motion[t_vis_mask]
+            rotations = rotations[t_vis_mask]
+            scales = scales[t_vis_mask]
+            opacity = opacity[t_vis_mask]
+            colors_precomp = colors_precomp[t_vis_mask]
+
+            num_t_vis_mask = t_vis_mask.sum()
+            num_all_splats = t_vis_mask.shape[0]
         
         rasterize_mode = "antialiased" if self.cfg.antialiased else "classic"
         render_colors, render_alphas, info = rasterization(
@@ -519,6 +558,21 @@ class Runner:
             # distributed=self.world_size > 1, # TODO
             **kwargs,
         )
+
+        # (Opt.) modify per-Gaussian related data in "info", except "info['means2d']"
+        if temp_vis_mask:
+            for name, v in info.items():
+                if isinstance(v, torch.Tensor) and name in ["radii", "depths", "conics", "opacities"]:
+                    new_shape = list(v.shape)
+                    new_shape[1] = num_all_splats
+                    new_tensor = torch.zeros(new_shape, dtype=v.dtype, device=v.device)
+                    new_tensor[:, t_vis_mask] = v
+
+                    info[name] = new_tensor
+            
+            info.update(
+                {"t_vis_mask": t_vis_mask}
+            )
 
         # Decode
         render_colors = render_colors.permute(0,3,1,2)
@@ -610,8 +664,6 @@ class Runner:
                 
                 # forward
                 renders, alphas, info = self.rasterize_splats(
-                    # R=R,
-                    # T=T,
                     timestamp=timestamp, # [C]
                     Ks=Ks, # [C, 3, 3]
                     width=width,
@@ -619,7 +671,7 @@ class Runner:
                     basicfunction=trbfunction,
                     rays=rays, # [C, 6, H, W]
                     camtoworld=camtoworld, # [C, 4, 4]
-                    # batch_size=cfg.batch_size,
+                    temp_vis_mask=self.cfg.temp_vis_mask
                 )
 
                 if renders.shape[-1] == 4:
@@ -738,6 +790,19 @@ class Runner:
                         maxbounds=self.maxbounds,
                         minbounds=self.minbounds,
                     )
+                elif isinstance(self.strategy, Modified_STG_Strategy):
+                    flag = self.strategy.step_post_backward(
+                        params=self.splats,
+                        optimizers=self.optimizers,
+                        state=self.strategy_state,
+                        step=step,
+                        info=info,
+                        packed=cfg.packed,
+                        flag=flag,
+                        desicnt=cfg.desicnt,
+                        maxbounds=self.maxbounds,
+                        minbounds=self.minbounds,
+                    )                    
                 else:
                     assert False, "Invalid strategy!" 
                     
