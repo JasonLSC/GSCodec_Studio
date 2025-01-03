@@ -25,10 +25,10 @@ WARNED = False
 def loadCam(args, id, cam_info, resolution_scale):
     orig_w, orig_h = cam_info.image.size
 
-    if args.resolution in [1, 2, 4, 8]:
-        resolution = round(orig_w/(resolution_scale * args.resolution)), round(orig_h/(resolution_scale * args.resolution))
+    if args.downscale_factor in [1, 2, 4, 8]:
+        resolution = round(orig_w/(resolution_scale * args.downscale_factor)), round(orig_h/(resolution_scale * args.downscale_factor))
     else:  # should be a type that converts to float
-        if args.resolution == -1:
+        if args.downscale_factor == -1:
             if orig_w > 1600:
                 global WARNED
                 if not WARNED:
@@ -39,7 +39,7 @@ def loadCam(args, id, cam_info, resolution_scale):
             else:
                 global_down = 1
         else:
-            global_down = orig_w / args.resolution
+            global_down = orig_w / args.downscale_factor
 
         scale = float(global_down) * float(resolution_scale)
         resolution = (int(orig_w / scale), int(orig_h / scale))
@@ -70,10 +70,10 @@ def loadCam(args, id, cam_info, resolution_scale):
 # @timer
 def loadCamv2(args, id, cam_info, resolution_scale):
     orig_w, orig_h =  cam_info.width, cam_info.height
-    if args.resolution in [1, 2, 4, 8]:
-        resolution = round(orig_w/(resolution_scale * args.resolution)), round(orig_h/(resolution_scale * args.resolution))
+    if args.downscale_factor in [1, 2, 4, 8]:
+        resolution = round(orig_w/(resolution_scale * args.downscale_factor)), round(orig_h/(resolution_scale * args.downscale_factor))
     else:  # should be a type that converts to float
-        if args.resolution == -1:
+        if args.downscale_factor == -1:
             if orig_w > 1600:
                 global WARNED
                 if not WARNED:
@@ -84,7 +84,7 @@ def loadCamv2(args, id, cam_info, resolution_scale):
             else:
                 global_down = 1
         else:
-            global_down = orig_w / args.resolution
+            global_down = orig_w / args.downscale_factor
 
         scale = float(global_down) * float(resolution_scale)
         resolution = (int(orig_w / scale), int(orig_h / scale))
@@ -107,6 +107,10 @@ def loadCamv2(args, id, cam_info, resolution_scale):
     else :
         rays_o = None
         rays_d = None
+
+    if gt_image is None:
+        gt_image = (resolution[0], resolution[1])
+    
     return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
                   FoVx=cam_info.FovX, FoVy=cam_info.FovY, 
                   image=gt_image, gt_alpha_mask=loaded_mask,
@@ -122,10 +126,10 @@ def loadCamv2(args, id, cam_info, resolution_scale):
 def loadCamv2timing(args, id, cam_info, resolution_scale):
     orig_w, orig_h = cam_info.image.size
 
-    if args.resolution in [1, 2, 4, 8]:
-        resolution = round(orig_w/(resolution_scale * args.resolution)), round(orig_h/(resolution_scale * args.resolution))
+    if args.downscale_factor in [1, 2, 4, 8]:
+        resolution = round(orig_w/(resolution_scale * args.downscale_factor)), round(orig_h/(resolution_scale * args.downscale_factor))
     else:  # should be a type that converts to float
-        if args.resolution == -1:
+        if args.downscale_factor == -1:
             if orig_w > 1600:
                 global WARNED
                 if not WARNED:
@@ -136,7 +140,7 @@ def loadCamv2timing(args, id, cam_info, resolution_scale):
             else:
                 global_down = 1
         else:
-            global_down = orig_w / args.resolution
+            global_down = orig_w / args.downscale_factor
 
         scale = float(global_down) * float(resolution_scale)
         resolution = (int(orig_w / scale), int(orig_h / scale))
@@ -166,11 +170,11 @@ def loadCamv2timing(args, id, cam_info, resolution_scale):
 
 def loadCamv2ss(args, id, cam_info, resolution_scale):
     orig_w, orig_h = cam_info.image.size
-    assert args.resolution == 1
-    if args.resolution in [1, 2, 4, 8]:
-        resolution = round(orig_w/(resolution_scale * args.resolution)), round(orig_h/(resolution_scale * args.resolution))
+    assert args.downscale_factor == 1
+    if args.downscale_factor in [1, 2, 4, 8]:
+        resolution = round(orig_w/(resolution_scale * args.downscale_factor)), round(orig_h/(resolution_scale * args.downscale_factor))
     else:  # should be a type that converts to float
-        if args.resolution == -1:
+        if args.downscale_factor == -1:
             if orig_w > 1600:
                 global WARNED
                 if not WARNED:
@@ -181,7 +185,7 @@ def loadCamv2ss(args, id, cam_info, resolution_scale):
             else:
                 global_down = 1
         else:
-            global_down = orig_w / args.resolution
+            global_down = orig_w / args.downscale_factor
 
         scale = float(global_down) * float(resolution_scale)
         resolution = (int(orig_w / scale), int(orig_h / scale))
@@ -214,10 +218,10 @@ def loadCamv2ss(args, id, cam_info, resolution_scale):
 def loadCamnogt(args, id, cam_info, resolution_scale):
     orig_w, orig_h = cam_info.width, cam_info.height
 
-    if args.resolution in [1, 2, 4, 8]:
-        resolution = round(orig_w/(resolution_scale * args.resolution)), round(orig_h/(resolution_scale * args.resolution))
+    if args.downscale_factor in [1, 2, 4, 8]:
+        resolution = round(orig_w/(resolution_scale * args.downscale_factor)), round(orig_h/(resolution_scale * args.downscale_factor))
     else:  # should be a type that converts to float
-        if args.resolution == -1:
+        if args.downscale_factor == -1:
             if orig_w > 1600:
                 global WARNED
                 if not WARNED:
@@ -228,7 +232,7 @@ def loadCamnogt(args, id, cam_info, resolution_scale):
             else:
                 global_down = 1
         else:
-            global_down = orig_w / args.resolution
+            global_down = orig_w / args.downscale_factor
 
         scale = float(global_down) * float(resolution_scale)
         resolution = (int(orig_w / scale), int(orig_h / scale))

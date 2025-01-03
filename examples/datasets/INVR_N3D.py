@@ -9,6 +9,7 @@ import cv2
 import imageio.v2 as imageio
 from PIL import Image
 import numpy as np
+
 import torch
 from pycolmap import SceneManager
 try:
@@ -38,8 +39,9 @@ class Parser:
         multiview: bool = False,
         duration: int = 5, # only for testing
         resolution_scales: list = [1.0],
-        resolution: int = 2,
+        downscale_factor: int = 2,
         data_device: str = "cpu",
+        test_view_id: List[int] = [0]
     ):
         self.model_path = model_path 
         self.source_path = source_path 
@@ -47,6 +49,7 @@ class Parser:
         self.eval = eval
         self.duration = duration
         self.resolution_scales = resolution_scales
+        self.test_view_id = test_view_id
         
         self.train_cameras = {}
         self.test_cameras = {}
@@ -54,7 +57,9 @@ class Parser:
         
         # Get scene info
         if loader == "colmap": # colmapvalid only for testing
-            scene_info = sceneLoadTypeCallbacks["Colmap"](self.source_path, self.images_phrase, self.eval, multiview, duration=self.duration) # SceneInfo() - NamedTuple
+            scene_info = sceneLoadTypeCallbacks["Colmap"](self.source_path, self.images_phrase, self.eval, multiview, duration=self.duration, test_view_id=self.test_view_id, downscale_factor=downscale_factor) # SceneInfo() - NamedTuple
+        elif loader == "invr":
+            scene_info = sceneLoadTypeCallbacks["INVR"](self.source_path, self.images_phrase, self.eval, multiview, duration=self.duration) # SceneInfo() - NamedTuple
         else:
             assert False, "Could not recognize scene type!"
 
@@ -65,7 +70,7 @@ class Parser:
         # need modification
         class ModelParams(): 
             def __init__(self):
-                self.resolution = resolution
+                self.downscale_factor = downscale_factor
                 self.data_device = data_device
         args = ModelParams()
         self.args = args
@@ -121,6 +126,7 @@ class Dataset(torch.utils.data.Dataset):
         self.num_views = num_views
         self.parser = parser
         self.resolution_scale = self.parser.resolution_scales[0]
+        self.split = split
         
         if split == "train":
             self.scene_info = self.parser.scene_info[1]
@@ -153,7 +159,7 @@ class Dataset(torch.utils.data.Dataset):
         
         self.start_frame = min(scene_by_t.keys())
         
-    def __len__(self):
+    def __len__(self): # num of timestamp
         return  self.fake_length if self.use_fake_length else len(self.scene_by_t)
         # return len(self.scene_info)
 
@@ -164,16 +170,19 @@ class Dataset(torch.utils.data.Dataset):
     def __getitem__(self, index: int) -> Dict[str, Any]:
         tid = index % len(self.scene_by_t)
         t_infos = self.scene_by_t[tid + self.start_frame]
-        try:
-            frame_infos = random.sample(t_infos, k=self.num_views)
-        except: #replace
-            frame_infos = random.choices(t_infos, k=self.num_views)
-        # frame_infos = np.random.choice(t_infos, self.num_views, replace=False) 
+        if self.split == "train":
+            try:
+                frame_infos = random.sample(t_infos, k=self.num_views)
+            except: #replace
+                frame_infos = random.choices(t_infos, k=self.num_views)
+        else:
+            frame_infos = t_infos[:self.num_views] # take out frames in single imgstamp by default order
+
         K = self.parser.K
-        scale = self.parser.args.resolution
+        downscale_factor = self.parser.args.downscale_factor
         Ks, images, image_paths, rays, timesteps, camtoworlds = [], [], [], [], [], []
         for globalid, cami, finfo in frame_infos:
-            resolution = (int(finfo.width / scale), int(finfo.height / scale))
+            resolution = (int(finfo.width / downscale_factor), int(finfo.height / downscale_factor))
             
             images.append(PILtoTorch_new(self.fetch_image(finfo.image_path), resolution).permute(1,2,0))
             image_paths.append(finfo.image_path)

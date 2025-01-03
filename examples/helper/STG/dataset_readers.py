@@ -78,7 +78,7 @@ def getNerfppNorm(cam_info):
 
     return {"translate": translate, "radius": radius, "camtoworld": C2W_list}
 
-def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, near, far, startime=0, duration=50):
+def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, near, far, startime=0, duration=50, downscale_factor=1):
     cam_infos = []
 
     # pose in llff. pipeline by hypereel 
@@ -87,39 +87,23 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, near, far, 
     with open(originnumpy, 'rb') as numpy_file:
         poses_bounds = np.load(numpy_file)
 
-
-        poses = poses_bounds[:, :15].reshape(-1, 3, 5)
+        poses = poses_bounds[:, :15].reshape(-1, 3, 5) # [N, 3, 5]
         bounds = poses_bounds[:, -2:]
-
 
         near = bounds.min() * 0.95
         far = bounds.max() * 1.05
-        
-        poses = poses_bounds[:, :15].reshape(-1, 3, 5) # 19, 3, 5
-
-
-
-
 
         H, W, focal = poses[0, :, -1]
         cx, cy = W / 2.0, H / 2.0
 
         # K = np.eye(3)
-        K[0, 0] = focal * W / W / 2.0
-        K[0, 2] = cx * W / W / 2.0
-        K[1, 1] = focal * H / H / 2.0
-        K[1, 2] = cy * H / H / 2.0
+        K[0, 0] = focal / downscale_factor
+        K[0, 2] = cx / downscale_factor
+        K[1, 1] = focal / downscale_factor
+        K[1, 2] = cy / downscale_factor
         
-        # K[0, 0] = focal * W / W / 1.0
-        # K[0, 2] = cx * W / W / 1.0
-        # K[1, 1] = focal * H / H / 1.0
-        # K[1, 2] = cy * H / H / 1.0
-        
-        imageH = int (H//2) # note hard coded to half of the original image size
-        imageW = int (W//2)
-        
-        # imageH = int (H) 
-        # imageW = int (W)
+        imageH = int(H//downscale_factor)
+        imageW = int(W//downscale_factor)
 
     totalcamname = []
     for idx, key in enumerate(cam_extrinsics): # first is cam20_ so we strictly sort by camera name
@@ -773,7 +757,7 @@ def readColmapSceneInfoMv(path, images, eval, llffhold=8, multiview=False, durat
 
 
 
-def readColmapSceneInfo(path, images, eval, llffhold=8, multiview=False, duration=50):
+def readColmapSceneInfo(path, images, eval, llffhold=8, multiview=False, duration=50, test_view_id=[0], downscale_factor=1):
     try:
         cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
         cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.bin")
@@ -796,25 +780,49 @@ def readColmapSceneInfo(path, images, eval, llffhold=8, multiview=False, duratio
     starttime = int(starttime)
     
 
-    cam_infos_unsorted = readColmapCameras(cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics, images_folder=os.path.join(path, reading_dir), near=near, far=far, startime=starttime, duration=duration)
+    cam_infos_unsorted = readColmapCameras(cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics, images_folder=os.path.join(path, reading_dir), near=near, far=far, startime=starttime, duration=duration, downscale_factor=downscale_factor)
     cam_infos = sorted(cam_infos_unsorted.copy(), key = lambda x : x.image_name)
 
     if eval:
-        train_cam_infos =  cam_infos[duration:] # Camera 1~20 train set
-        test_cam_infos = cam_infos[:duration] # Camera 0 test set
-        # import pdb; pdb.set_trace()
-        uniquecheck = []
-        for cam_info in test_cam_infos:
-            if cam_info.image_name not in uniquecheck:
-                uniquecheck.append(cam_info.image_name)
-        assert len(uniquecheck) == 1 
-        
-        sanitycheck = []
-        for cam_info in train_cam_infos:
-            if cam_info.image_name not in sanitycheck:
-                sanitycheck.append(cam_info.image_name)
-        for testname in uniquecheck:
-            assert testname not in sanitycheck
+        if len(test_view_id) == 1 and test_view_id[0] == 0: # Neu3DVideo mode
+            train_cam_infos =  cam_infos[duration:] # Camera 1~20 train set
+            test_cam_infos = cam_infos[:duration] # Camera 0 test set
+
+            uniquecheck = []
+            for cam_info in test_cam_infos:
+                if cam_info.image_name not in uniquecheck:
+                    uniquecheck.append(cam_info.image_name)
+            assert len(uniquecheck) == 1 
+            
+            sanitycheck = []
+            for cam_info in train_cam_infos:
+                if cam_info.image_name not in sanitycheck:
+                    sanitycheck.append(cam_info.image_name)
+            for testname in uniquecheck:
+                assert testname not in sanitycheck
+
+        else: # INVR mode
+            selected_test_frame_id = np.zeros(len(cam_infos), dtype=bool)
+            for vid in test_view_id:
+                selected_test_frame_id[vid*duration: (vid+1)*duration] = True
+            selected_train_frame_id = np.logical_not(selected_test_frame_id)
+
+            train_cam_infos = [cam_info for i, cam_info in enumerate(cam_infos) if selected_train_frame_id[i]]
+            test_cam_infos = [cam_info for i, cam_info in enumerate(cam_infos) if selected_test_frame_id[i]]
+
+            uniquecheck = []
+            for cam_info in test_cam_infos:
+                if cam_info.image_name not in uniquecheck:
+                    uniquecheck.append(cam_info.image_name)
+            assert len(uniquecheck) == len(test_view_id)
+            
+            sanitycheck = []
+            for cam_info in train_cam_infos:
+                if cam_info.image_name not in sanitycheck:
+                    sanitycheck.append(cam_info.image_name)
+            for testname in uniquecheck:
+                assert testname not in sanitycheck
+
     else:
         train_cam_infos = cam_infos
         test_cam_infos = cam_infos[:2] #dummy
@@ -837,7 +845,7 @@ def readColmapSceneInfo(path, images, eval, llffhold=8, multiview=False, duratio
         totalxyz = []
         totalrgb = []
         totaltime = []
-        for i in range(starttime, starttime + duration):
+        for i in range(starttime, starttime + duration): # sample pcd every 5 frames
             thisbin_path = os.path.join(path, "sparse/0/points3D.bin").replace("colmap_"+ str(starttime), "colmap_" + str(i), 1)
             xyz, rgb, _ = read_points3D_binary(thisbin_path)
             totalxyz.append(xyz)
@@ -1206,13 +1214,103 @@ def readColmapCamerasImmersivev2(cam_extrinsics, cam_intrinsics, images_folder, 
             cam_infos.append(cam_info)
     sys.stdout.write('\n')
     return cam_infos
+
+def readColmapSceneInfoINVR(path, images, eval, llffhold=8, multiview=False, duration=50):
+    try:
+        cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
+        cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.bin")
+        cam_extrinsics = read_extrinsics_binary(cameras_extrinsic_file)
+        cam_intrinsics = read_intrinsics_binary(cameras_intrinsic_file)
+    except:
+        cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.txt")
+        cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.txt")
+        cam_extrinsics = read_extrinsics_text(cameras_extrinsic_file)
+        cam_intrinsics = read_intrinsics_text(cameras_intrinsic_file)
+
+    reading_dir = "images" if images == None else images
+    parentdir = os.path.dirname(path)
+
+    near = 0.01
+    far = 100
+
+    starttime = os.path.basename(path).split("_")[1] # colmap_0, 
+    assert starttime.isdigit(), "Colmap folder name must be colmap_<startime>_<duration>!"
+    starttime = int(starttime)
     
+
+    cam_infos_unsorted = readColmapCameras(cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics, images_folder=os.path.join(path, reading_dir), near=near, far=far, startime=starttime, duration=duration)
+    cam_infos = sorted(cam_infos_unsorted.copy(), key = lambda x : x.image_name)
+
+    if eval:
+        train_cam_infos = cam_infos[duration:] # Camera 1~20 train set
+        test_cam_infos = cam_infos[:duration] # Camera 0 test set
+
+        uniquecheck = []
+        for cam_info in test_cam_infos:
+            if cam_info.image_name not in uniquecheck:
+                uniquecheck.append(cam_info.image_name)
+        assert len(uniquecheck) == 1 
+        
+        sanitycheck = []
+        for cam_info in train_cam_infos:
+            if cam_info.image_name not in sanitycheck:
+                sanitycheck.append(cam_info.image_name)
+        for testname in uniquecheck:
+            assert testname not in sanitycheck
+    else:
+        train_cam_infos = cam_infos
+        test_cam_infos = cam_infos[:2] #dummy
+
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+    nerf_normalization_test = getNerfppNorm(test_cam_infos)
+    
+    ply_path = os.path.join(path, "sparse/0/points3D.ply")
+    bin_path = os.path.join(path, "sparse/0/points3D.bin")
+    txt_path = os.path.join(path, "sparse/0/points3D.txt")
+    totalply_path = os.path.join(path, "sparse/0/points3D_total" + str(duration) + ".ply")
+    
+
+    # merge SfM point clouds from consecutive frames into a single .ply file
+    # pc from different frames have corresponding time index
+    # these points will be used for initialization
+    if not os.path.exists(totalply_path):
+        print("Merge SfM point clouds from consecutive frames into a single .ply file")
+        print("Converting point3d.bin to .ply, will happen only the first time you open the scene.")
+        totalxyz = []
+        totalrgb = []
+        totaltime = []
+        for i in range(starttime, starttime + duration):
+            thisbin_path = os.path.join(path, "sparse/0/points3D.bin").replace("colmap_"+ str(starttime), "colmap_" + str(i), 1)
+            xyz, rgb, _ = read_points3D_binary(thisbin_path)
+            totalxyz.append(xyz)
+            totalrgb.append(rgb)
+            totaltime.append(np.ones((xyz.shape[0], 1)) * (i-starttime) / duration)
+        xyz = np.concatenate(totalxyz, axis=0)
+        rgb = np.concatenate(totalrgb, axis=0)
+        totaltime = np.concatenate(totaltime, axis=0)
+        assert xyz.shape[0] == rgb.shape[0]  
+        xyzt =np.concatenate( (xyz, totaltime), axis=1)     
+        storePly(totalply_path, xyzt, rgb)
+    try:
+        pcd = fetchPly(totalply_path)
+    except:
+        pcd = None
+
+    scene_info = SceneInfo(point_cloud=pcd,
+                           train_cameras=train_cam_infos,
+                           test_cameras=test_cam_infos,
+                           nerf_normalization=nerf_normalization,
+                           nerf_normalization_test=nerf_normalization_test,
+                           ply_path=totalply_path)
+    return scene_info
+
 sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
     "Immersive": readColmapSceneInfoImmersive,
     "Colmapmv": readColmapSceneInfoMv,
     "Blender" : readNerfSyntheticInfo, 
     "Technicolor": readColmapSceneInfoTechnicolor,
+    "INVR": readColmapSceneInfoINVR
 }
 
 
