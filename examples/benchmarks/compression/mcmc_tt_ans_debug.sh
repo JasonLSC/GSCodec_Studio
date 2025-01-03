@@ -1,6 +1,6 @@
 SCENE_DIR="data/tandt"
 # eval all 2 scenes for benchmarking
-SCENE_LIST="train truck"
+SCENE_LIST="train truck" # truck
 
 # # 0.36M GSs
 # RESULT_DIR="results/benchmark_tt_mcmc_0_36M_png_compression"
@@ -11,7 +11,7 @@ SCENE_LIST="train truck"
 # CAP_MAX=490000
 
 # 1M GSs
-RESULT_DIR="results/benchmark_tt_mcmc_1M_png_compression"
+RESULT_DIR="results/Ours_TT_rd_lambda_0.002_qualitative"
 CAP_MAX=1000000
 
 # # 4M GSs

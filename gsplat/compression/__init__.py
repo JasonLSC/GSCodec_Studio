@@ -1,1 +1,2 @@
 from .png_compression import PngCompression
+from .entropy_coding_compression import EntropyCodingCompression

@@ -77,6 +77,8 @@ target/
 
 # Jupyter Notebook
 .ipynb_checkpoints
+.ipynb
+*.ipynb
 
 # pyenv
 .python-version
@@ -124,7 +126,17 @@ compile_commands.json
 data
 results
 
+third_party
+# gscodec
+setup_gscodec.py
+Readme_GSCodec.md
+
+figs
+stats
+temp
+
 !examples/benchmarks/compression/results/
+.github/
 
 setup_gscodec.py
 *.ipynb

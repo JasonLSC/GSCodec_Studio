@@ -2,9 +2,10 @@ import json
 import math
 import os
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union, ContextManager
 
 import imageio
 import nerfview
@@ -28,6 +29,9 @@ from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMe
 from fused_ssim import fused_ssim
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from typing_extensions import Literal, assert_never
+from gsplat import strategy
+from gsplat.compression.entropy_coding_compression import EntropyCodingCompression
+from gsplat.compression_simulation import simulation
 from utils import AppearanceOptModule, CameraOptModule, knn, rgb_to_sh, set_random_seed
 from lib_bilagrid import (
     BilateralGrid,
@@ -42,6 +46,48 @@ from gsplat.rendering import rasterization
 from gsplat.strategy import DefaultStrategy, MCMCStrategy
 from gsplat.optimizers import SelectiveAdam
 
+from gsplat.compression_simulation import CompressionSimulation
+from gsplat.compression_simulation.entropy_model import Entropy_factorized_optimized_refactor, Entropy_gaussian
+
+class ProfilerConfig:
+    def __init__(self):
+        self.enabled = False
+        self.activities = [
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ]
+        
+        # 基础配置
+        self.wait = 1      # 开始记录前等待的步数
+        self.warmup = 2    # 预热步数
+        self.active = 30_000    # 实际分析的步数
+        # self.repeat = 2    # 重复次数
+        # self.skip_first = 10  # 跳过前N步（可选）
+        
+        # 创建schedule
+        self.schedule = self._create_schedule()
+        
+        # 其他profiler设置
+        self.on_trace_ready = torch.profiler.tensorboard_trace_handler('./log/profiler')
+        self.record_shapes = True
+        self.profile_memory = True
+        self.with_stack = True
+    
+    def _create_schedule(self):
+        return torch.profiler.schedule(
+            wait=self.wait,
+            warmup=self.warmup,
+            active=self.active,
+            # repeat=self.repeat,
+            # skip_first=self.skip_first
+        )
+    
+    def update_schedule(self, **kwargs):
+        """动态更新schedule参数"""
+        for key, value in kwargs.items():
+            if hasattr(self, key):
+                setattr(self, key, value)
+        self.schedule = self._create_schedule()
 
 @dataclass
 class Config:
@@ -50,7 +96,43 @@ class Config:
     # Path to the .pt files. If provide, it will skip training and run evaluation only.
     ckpt: Optional[List[str]] = None
     # Name of compression strategy to use
-    compression: Optional[Literal["png"]] = None
+    compression: Optional[Literal["png", "entropy_coding"]] = None
+
+    # Enable profiler
+    profiler_enabled: bool = False
+
+    # Enable compression simulation
+    compression_sim: bool = False
+    # Name of quantization simulation strategy to use
+    quantization_sim: Optional[Literal["round", "noise", "vq"]] = None
+
+    # Enable entropy model
+    entropy_model_opt: bool = False
+    # Define the type of entropy model
+    entropy_model_type: Literal["factorized_model", "gaussian_model"] = "factorized_model"
+    # Bit-rate distortion trade-off parameter
+    rd_lambda: float = 1e-2 # default: 1e-2
+    # Steps to enable entropy model into training pipeline
+    # factorized model:
+    entropy_steps: Dict[str, int] = field(default_factory=lambda: {"means": -1, 
+                                                                   "quats": 10_000, 
+                                                                   "scales": 10_000, 
+                                                                   "opacities": 10_000, 
+                                                                   "sh0": 20_000, 
+                                                                   "shN": 10_000})
+    # gaussian model:
+    # entropy_steps: Dict[str, int] = field(default_factory=lambda: {"means": -1, 
+    #                                                                "quats": 10_000, 
+    #                                                                "scales": 10_000, 
+    #                                                                "opacities": 10_000, 
+    #                                                                "sh0": 20_000, 
+    #                                                                "shN": -1})
+
+    # Enable shN adaptive mask
+    shN_ada_mask_opt: bool = False
+    # Steps to enable shN adaptive mask
+    ada_mask_steps: int = 10_000
+    
     # Render trajectory path
     render_traj_path: str = "interp"
 
@@ -353,8 +435,30 @@ class Runner:
         if cfg.compression is not None:
             if cfg.compression == "png":
                 self.compression_method = PngCompression()
+            elif  cfg.compression == "entropy_coding":
+                self.compression_method = EntropyCodingCompression()
             else:
                 raise ValueError(f"Unknown compression strategy: {cfg.compression}")
+        
+        if cfg.compression_sim:
+            # TODO: bad impl. 
+            cap_max = cfg.strategy.cap_max if cfg.strategy.cap_max is not None else None
+            self.compression_sim_method = CompressionSimulation(cfg.entropy_model_opt, 
+                                                    cfg.entropy_model_type,
+                                                    cfg.entropy_steps, 
+                                                    self.device, 
+                                                    cfg.shN_ada_mask_opt,
+                                                    cfg.ada_mask_steps,
+                                                    cap_max=cap_max,)
+            if cfg.entropy_model_opt:
+                selected_key = min((k for k, v in cfg.entropy_steps.items() if v > 0), key=lambda k: cfg.entropy_steps[k])
+                self.entropy_min_step = cfg.entropy_steps[selected_key]
+        
+        # Profiler
+        self.profiler: Optional[torch.profiler.profile] = None
+        self.profiler_config = ProfilerConfig()
+        if cfg.profiler_enabled:
+            self.profiler_config.enabled = True
 
         self.pose_optimizers = []
         if cfg.pose_opt:
@@ -440,6 +544,24 @@ class Runner:
                 mode="training",
             )
 
+    def get_profiler(self, tb_writer) -> ContextManager:
+        if self.profiler_config.enabled:
+            return torch.profiler.profile(
+                activities=self.profiler_config.activities,
+                schedule=self.profiler_config.schedule,
+                # on_trace_ready=self.profiler_config.on_trace_ready, 
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(tb_writer.log_dir),
+                record_shapes=self.profiler_config.record_shapes,
+                profile_memory=self.profiler_config.profile_memory,
+                with_stack=self.profiler_config.with_stack
+            )
+        return nullcontext()
+
+    def step_profiler(self):
+        """step profiler"""
+        if self.profiler is not None:
+            self.profiler.step()
+
     def rasterize_splats(
         self,
         camtoworlds: Tensor,
@@ -449,12 +571,19 @@ class Runner:
         masks: Optional[Tensor] = None,
         **kwargs,
     ) -> Tuple[Tensor, Tensor, Dict]:
-        means = self.splats["means"]  # [N, 3]
-        # quats = F.normalize(self.splats["quats"], dim=-1)  # [N, 4]
-        # rasterization does normalization internally
-        quats = self.splats["quats"]  # [N, 4]
-        scales = torch.exp(self.splats["scales"])  # [N, 3]
-        opacities = torch.sigmoid(self.splats["opacities"])  # [N,]
+        if not self.cfg.compression_sim:
+            means = self.splats["means"]  # [N, 3]
+            quats = self.splats["quats"]  # [N, 4]
+            scales = torch.exp(self.splats["scales"])  # [N, 3]
+            opacities = torch.sigmoid(self.splats["opacities"])  # [N,]
+            sh0, shN = self.splats["sh0"], self.splats["shN"]
+        else:
+            means = self.comp_sim_splats["means"]  # [N, 3]
+            quats = self.comp_sim_splats["quats"]  # [N, 4]
+            scales = torch.exp(self.comp_sim_splats["scales"])  # [N, 3]
+            opacities = torch.sigmoid(self.comp_sim_splats["opacities"])  # [N,]
+            sh0, shN = self.comp_sim_splats["sh0"], self.comp_sim_splats["shN"]
+
 
         image_ids = kwargs.pop("image_ids", None)
         if self.cfg.app_opt:
@@ -467,7 +596,7 @@ class Runner:
             colors = colors + self.splats["colors"]
             colors = torch.sigmoid(colors)
         else:
-            colors = torch.cat([self.splats["sh0"], self.splats["shN"]], 1)  # [N, K, 3]
+            colors = torch.cat([sh0, shN], 1)  # [N, K, 3]
 
         rasterize_mode = "antialiased" if self.cfg.antialiased else "classic"
         render_colors, render_alphas, info = rasterization(
@@ -550,206 +679,265 @@ class Runner:
         )
         trainloader_iter = iter(trainloader)
 
-        # Training loop.
-        global_tic = time.time()
-        pbar = tqdm.tqdm(range(init_step, max_steps))
-        for step in pbar:
-            if not cfg.disable_viewer:
-                while self.viewer.state.status == "paused":
-                    time.sleep(0.01)
-                self.viewer.lock.acquire()
-                tic = time.time()
+        with self.get_profiler(self.writer) as prof:
+            self.profiler = prof if self.profiler_config.enabled else None
 
-            try:
-                data = next(trainloader_iter)
-            except StopIteration:
-                trainloader_iter = iter(trainloader)
-                data = next(trainloader_iter)
+            # Training loop.
+            global_tic = time.time()
+            pbar = tqdm.tqdm(range(init_step, max_steps))
+            for step in pbar:
+                if not cfg.disable_viewer:
+                    while self.viewer.state.status == "paused":
+                        time.sleep(0.01)
+                    self.viewer.lock.acquire()
+                    tic = time.time()
 
-            camtoworlds = camtoworlds_gt = data["camtoworld"].to(device)  # [1, 4, 4]
-            Ks = data["K"].to(device)  # [1, 3, 3]
-            pixels = data["image"].to(device) / 255.0  # [1, H, W, 3]
-            num_train_rays_per_step = (
-                pixels.shape[0] * pixels.shape[1] * pixels.shape[2]
-            )
-            image_ids = data["image_id"].to(device)
-            masks = data["mask"].to(device) if "mask" in data else None  # [1, H, W]
-            if cfg.depth_loss:
-                points = data["points"].to(device)  # [1, M, 2]
-                depths_gt = data["depths"].to(device)  # [1, M]
+                try:
+                    data = next(trainloader_iter)
+                except StopIteration:
+                    trainloader_iter = iter(trainloader)
+                    data = next(trainloader_iter)
 
-            height, width = pixels.shape[1:3]
-
-            if cfg.pose_noise:
-                camtoworlds = self.pose_perturb(camtoworlds, image_ids)
-
-            if cfg.pose_opt:
-                camtoworlds = self.pose_adjust(camtoworlds, image_ids)
-
-            # sh schedule
-            sh_degree_to_use = min(step // cfg.sh_degree_interval, cfg.sh_degree)
-
-            # forward
-            renders, alphas, info = self.rasterize_splats(
-                camtoworlds=camtoworlds,
-                Ks=Ks,
-                width=width,
-                height=height,
-                sh_degree=sh_degree_to_use,
-                near_plane=cfg.near_plane,
-                far_plane=cfg.far_plane,
-                image_ids=image_ids,
-                render_mode="RGB+ED" if cfg.depth_loss else "RGB",
-                masks=masks,
-            )
-            if renders.shape[-1] == 4:
-                colors, depths = renders[..., 0:3], renders[..., 3:4]
-            else:
-                colors, depths = renders, None
-
-            if cfg.use_bilateral_grid:
-                grid_y, grid_x = torch.meshgrid(
-                    (torch.arange(height, device=self.device) + 0.5) / height,
-                    (torch.arange(width, device=self.device) + 0.5) / width,
-                    indexing="ij",
+                camtoworlds = camtoworlds_gt = data["camtoworld"].to(device)  # [1, 4, 4]
+                Ks = data["K"].to(device)  # [1, 3, 3]
+                pixels = data["image"].to(device) / 255.0  # [1, H, W, 3]
+                num_train_rays_per_step = (
+                    pixels.shape[0] * pixels.shape[1] * pixels.shape[2]
                 )
-                grid_xy = torch.stack([grid_x, grid_y], dim=-1).unsqueeze(0)
-                colors = slice(self.bil_grids, grid_xy, colors, image_ids)["rgb"]
-
-            if cfg.random_bkgd:
-                bkgd = torch.rand(1, 3, device=device)
-                colors = colors + bkgd * (1.0 - alphas)
-
-            self.cfg.strategy.step_pre_backward(
-                params=self.splats,
-                optimizers=self.optimizers,
-                state=self.strategy_state,
-                step=step,
-                info=info,
-            )
-
-            # loss
-            l1loss = F.l1_loss(colors, pixels)
-            ssimloss = 1.0 - fused_ssim(
-                colors.permute(0, 3, 1, 2), pixels.permute(0, 3, 1, 2), padding="valid"
-            )
-            loss = l1loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda
-            if cfg.depth_loss:
-                # query depths from depth map
-                points = torch.stack(
-                    [
-                        points[:, :, 0] / (width - 1) * 2 - 1,
-                        points[:, :, 1] / (height - 1) * 2 - 1,
-                    ],
-                    dim=-1,
-                )  # normalize to [-1, 1]
-                grid = points.unsqueeze(2)  # [1, M, 1, 2]
-                depths = F.grid_sample(
-                    depths.permute(0, 3, 1, 2), grid, align_corners=True
-                )  # [1, 1, M, 1]
-                depths = depths.squeeze(3).squeeze(1)  # [1, M]
-                # calculate loss in disparity space
-                disp = torch.where(depths > 0.0, 1.0 / depths, torch.zeros_like(depths))
-                disp_gt = 1.0 / depths_gt  # [1, M]
-                depthloss = F.l1_loss(disp, disp_gt) * self.scene_scale
-                loss += depthloss * cfg.depth_lambda
-            if cfg.use_bilateral_grid:
-                tvloss = 10 * total_variation_loss(self.bil_grids.grids)
-                loss += tvloss
-
-            # regularizations
-            if cfg.opacity_reg > 0.0:
-                loss = (
-                    loss
-                    + cfg.opacity_reg
-                    * torch.abs(torch.sigmoid(self.splats["opacities"])).mean()
-                )
-            if cfg.scale_reg > 0.0:
-                loss = (
-                    loss
-                    + cfg.scale_reg * torch.abs(torch.exp(self.splats["scales"])).mean()
-                )
-
-            loss.backward()
-
-            desc = f"loss={loss.item():.3f}| " f"sh degree={sh_degree_to_use}| "
-            if cfg.depth_loss:
-                desc += f"depth loss={depthloss.item():.6f}| "
-            if cfg.pose_opt and cfg.pose_noise:
-                # monitor the pose error if we inject noise
-                pose_err = F.l1_loss(camtoworlds_gt, camtoworlds)
-                desc += f"pose err={pose_err.item():.6f}| "
-            pbar.set_description(desc)
-
-            # write images (gt and render)
-            # if world_rank == 0 and step % 800 == 0:
-            #     canvas = torch.cat([pixels, colors], dim=2).detach().cpu().numpy()
-            #     canvas = canvas.reshape(-1, *canvas.shape[2:])
-            #     imageio.imwrite(
-            #         f"{self.render_dir}/train_rank{self.world_rank}.png",
-            #         (canvas * 255).astype(np.uint8),
-            #     )
-
-            if world_rank == 0 and cfg.tb_every > 0 and step % cfg.tb_every == 0:
-                mem = torch.cuda.max_memory_allocated() / 1024**3
-                self.writer.add_scalar("train/loss", loss.item(), step)
-                self.writer.add_scalar("train/l1loss", l1loss.item(), step)
-                self.writer.add_scalar("train/ssimloss", ssimloss.item(), step)
-                self.writer.add_scalar("train/num_GS", len(self.splats["means"]), step)
-                self.writer.add_scalar("train/mem", mem, step)
+                image_ids = data["image_id"].to(device)
+                masks = data["mask"].to(device) if "mask" in data else None  # [1, H, W]
                 if cfg.depth_loss:
-                    self.writer.add_scalar("train/depthloss", depthloss.item(), step)
-                if cfg.use_bilateral_grid:
-                    self.writer.add_scalar("train/tvloss", tvloss.item(), step)
-                if cfg.tb_save_image:
-                    canvas = torch.cat([pixels, colors], dim=2).detach().cpu().numpy()
-                    canvas = canvas.reshape(-1, *canvas.shape[2:])
-                    self.writer.add_image("train/render", canvas, step)
-                self.writer.flush()
+                    points = data["points"].to(device)  # [1, M, 2]
+                    depths_gt = data["depths"].to(device)  # [1, M]
 
-            # save checkpoint before updating the model
-            if step in [i - 1 for i in cfg.save_steps] or step == max_steps - 1:
-                mem = torch.cuda.max_memory_allocated() / 1024**3
-                stats = {
-                    "mem": mem,
-                    "ellipse_time": time.time() - global_tic,
-                    "num_GS": len(self.splats["means"]),
-                }
-                print("Step: ", step, stats)
-                with open(
-                    f"{self.stats_dir}/train_step{step:04d}_rank{self.world_rank}.json",
-                    "w",
-                ) as f:
-                    json.dump(stats, f)
-                data = {"step": step, "splats": self.splats.state_dict()}
+                height, width = pixels.shape[1:3]
+
+                if cfg.pose_noise:
+                    camtoworlds = self.pose_perturb(camtoworlds, image_ids)
+
                 if cfg.pose_opt:
-                    if world_size > 1:
-                        data["pose_adjust"] = self.pose_adjust.module.state_dict()
-                    else:
-                        data["pose_adjust"] = self.pose_adjust.state_dict()
-                if cfg.app_opt:
-                    if world_size > 1:
-                        data["app_module"] = self.app_module.module.state_dict()
-                    else:
-                        data["app_module"] = self.app_module.state_dict()
-                torch.save(
-                    data, f"{self.ckpt_dir}/ckpt_{step}_rank{self.world_rank}.pt"
+                    camtoworlds = self.pose_adjust(camtoworlds, image_ids)
+
+                # sh schedule
+                sh_degree_to_use = min(step // cfg.sh_degree_interval, cfg.sh_degree)
+
+                # compression simulation
+                if cfg.compression_sim and cfg.entropy_model_opt and cfg.entropy_model_type == "gaussian_model": # if hash-based gaussian model, need to estiblish bbox
+                    if step == self.entropy_min_step:
+                        self.compression_sim_method._estiblish_bbox(self.splats["means"])
+
+                if cfg.compression_sim:
+                    self.comp_sim_splats, self.esti_bits_dict = self.compression_sim_method.simulate_compression(self.splats, step)
+
+                # forward
+                renders, alphas, info = self.rasterize_splats(
+                    camtoworlds=camtoworlds,
+                    Ks=Ks,
+                    width=width,
+                    height=height,
+                    sh_degree=sh_degree_to_use,
+                    near_plane=cfg.near_plane,
+                    far_plane=cfg.far_plane,
+                    image_ids=image_ids,
+                    render_mode="RGB+ED" if cfg.depth_loss else "RGB",
+                    masks=masks,
+                )
+                if renders.shape[-1] == 4:
+                    colors, depths = renders[..., 0:3], renders[..., 3:4]
+                else:
+                    colors, depths = renders, None
+
+                if cfg.use_bilateral_grid:
+                    grid_y, grid_x = torch.meshgrid(
+                        (torch.arange(height, device=self.device) + 0.5) / height,
+                        (torch.arange(width, device=self.device) + 0.5) / width,
+                        indexing="ij",
+                    )
+                    grid_xy = torch.stack([grid_x, grid_y], dim=-1).unsqueeze(0)
+                    colors = slice(self.bil_grids, grid_xy, colors, image_ids)["rgb"]
+
+                if cfg.random_bkgd:
+                    bkgd = torch.rand(1, 3, device=device)
+                    colors = colors + bkgd * (1.0 - alphas)
+
+                self.cfg.strategy.step_pre_backward(
+                    params=self.splats,
+                    optimizers=self.optimizers,
+                    state=self.strategy_state,
+                    step=step,
+                    info=info,
                 )
 
-            # Turn Gradients into Sparse Tensor before running optimizer
-            if cfg.sparse_grad:
-                assert cfg.packed, "Sparse gradients only work with packed mode."
-                gaussian_ids = info["gaussian_ids"]
-                for k in self.splats.keys():
-                    grad = self.splats[k].grad
-                    if grad is None or grad.is_sparse:
-                        continue
-                    self.splats[k].grad = torch.sparse_coo_tensor(
-                        indices=gaussian_ids[None],  # [1, nnz]
-                        values=grad[gaussian_ids],  # [nnz, ...]
-                        size=self.splats[k].size(),  # [N, ...]
-                        is_coalesced=len(Ks) == 1,
+                # loss
+                l1loss = F.l1_loss(colors, pixels)
+                ssimloss = 1.0 - fused_ssim(
+                    colors.permute(0, 3, 1, 2), pixels.permute(0, 3, 1, 2), padding="valid"
+                )
+                loss = l1loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda
+                if cfg.depth_loss:
+                    # query depths from depth map
+                    points = torch.stack(
+                        [
+                            points[:, :, 0] / (width - 1) * 2 - 1,
+                            points[:, :, 1] / (height - 1) * 2 - 1,
+                        ],
+                        dim=-1,
+                    )  # normalize to [-1, 1]
+                    grid = points.unsqueeze(2)  # [1, M, 1, 2]
+                    depths = F.grid_sample(
+                        depths.permute(0, 3, 1, 2), grid, align_corners=True
+                    )  # [1, 1, M, 1]
+                    depths = depths.squeeze(3).squeeze(1)  # [1, M]
+                    # calculate loss in disparity space
+                    disp = torch.where(depths > 0.0, 1.0 / depths, torch.zeros_like(depths))
+                    disp_gt = 1.0 / depths_gt  # [1, M]
+                    depthloss = F.l1_loss(disp, disp_gt) * self.scene_scale
+                    loss += depthloss * cfg.depth_lambda
+                if cfg.use_bilateral_grid:
+                    tvloss = 10 * total_variation_loss(self.bil_grids.grids)
+                    loss += tvloss
+
+                # regularizations
+                if cfg.opacity_reg > 0.0:
+                    loss = (
+                        loss
+                        + cfg.opacity_reg
+                        * torch.abs(torch.sigmoid(self.splats["opacities"])).mean()
                     )
+                if cfg.scale_reg > 0.0:
+                    loss = (
+                        loss
+                        + cfg.scale_reg * torch.abs(torch.exp(self.splats["scales"])).mean()
+                    )
+                
+                # entropy constraint
+                if cfg.entropy_model_opt and step>self.entropy_min_step:
+                    total_esti_bits = 0
+                    for n, n_step in cfg.entropy_steps.items():
+                        if step > n_step and self.esti_bits_dict[n] is not None:
+                            # maybe give different params with different weights
+                            total_esti_bits += torch.sum(self.esti_bits_dict[n]) / self.esti_bits_dict[n].numel() # bpp
+                        else:
+                            total_esti_bits += 0
+
+                    loss = (
+                        loss
+                        + cfg.rd_lambda * total_esti_bits
+                    )
+                
+                if cfg.compression_sim:
+                    if self.compression_sim_method.shN_ada_mask_opt and step > cfg.ada_mask_steps:
+                        loss = loss + self.compression_sim_method.shN_ada_mask.get_sparsity_loss()
+                
+                # tmp workaround
+                loss_show = loss.detach().cpu()
+                loss.backward()
+                
+                desc = f"loss={loss_show.item():.3f}| " f"sh degree={sh_degree_to_use}| "
+                if cfg.depth_loss:
+                    desc += f"depth loss={depthloss.item():.6f}| "
+                if cfg.pose_opt and cfg.pose_noise:
+                    # monitor the pose error if we inject noise
+                    pose_err = F.l1_loss(camtoworlds_gt, camtoworlds)
+                    desc += f"pose err={pose_err.item():.6f}| "
+                pbar.set_description(desc)
+
+                # write images (gt and render)
+                # if world_rank == 0 and step % 800 == 0:
+                #     canvas = torch.cat([pixels, colors], dim=2).detach().cpu().numpy()
+                #     canvas = canvas.reshape(-1, *canvas.shape[2:])
+                #     imageio.imwrite(
+                #         f"{self.render_dir}/train_rank{self.world_rank}.png",
+                #         (canvas * 255).astype(np.uint8),
+                #     )
+
+                # tensorboard monitor
+                if world_rank == 0 and cfg.tb_every > 0 and step % cfg.tb_every == 0:
+                    mem = torch.cuda.max_memory_allocated() / 1024**3
+                    self.writer.add_scalar("train/loss", loss.item(), step)
+                    self.writer.add_scalar("train/l1loss", l1loss.item(), step)
+                    self.writer.add_scalar("train/ssimloss", ssimloss.item(), step)
+                    self.writer.add_scalar("train/num_GS", len(self.splats["means"]), step)
+                    self.writer.add_scalar("train/mem", mem, step)
+                    if cfg.depth_loss:
+                        self.writer.add_scalar("train/depthloss", depthloss.item(), step)
+                    if cfg.use_bilateral_grid:
+                        self.writer.add_scalar("train/tvloss", tvloss.item(), step)
+                    if cfg.tb_save_image:
+                        canvas = torch.cat([pixels, colors], dim=2).detach().cpu().numpy()
+                        canvas = canvas.reshape(-1, *canvas.shape[2:])
+                        self.writer.add_image("train/render", canvas, step)
+                    if cfg.compression_sim:
+                        if cfg.entropy_model_opt and step>self.entropy_min_step:
+                            self.writer.add_histogram("train_hist/quats", self.splats["quats"], step)
+                            self.writer.add_histogram("train_hist/scales", self.splats["scales"], step)
+                            self.writer.add_histogram("train_hist/opacities", self.splats["opacities"], step)
+                            self.writer.add_histogram("train_hist/sh0", self.splats["sh0"], step)
+                            if total_esti_bits > 0:
+                                self.writer.add_scalar("train/bpp_loss", total_esti_bits.item(), step)
+                        if self.compression_sim_method.shN_ada_mask_opt and step > cfg.ada_mask_steps:
+                            self.writer.add_scalar("train/ada_mask", self.compression_sim_method.shN_ada_mask.get_mask_ratio(), step)
+                        
+                    self.writer.add_histogram("train_hist/means", self.splats["means"], step)
+                    self.writer.flush()
+
+                # save checkpoint before updating the model
+                if step in [i - 1 for i in cfg.save_steps] or step == max_steps - 1:
+                    mem = torch.cuda.max_memory_allocated() / 1024**3
+                    stats = {
+                        "mem": mem,
+                        "ellipse_time": time.time() - global_tic,
+                        "num_GS": len(self.splats["means"]),
+                    }
+                    print("Step: ", step, stats)
+                    with open(
+                        f"{self.stats_dir}/train_step{step:04d}_rank{self.world_rank}.json",
+                        "w",
+                    ) as f:
+                        json.dump(stats, f)
+                    
+                    if cfg.shN_ada_mask_opt and step > cfg.ada_mask_steps:
+                        shN_ada_mask = self.compression_sim_method.shN_ada_mask.get_binary_mask()
+                        self.splats["shN"].data = self.splats["shN"].data * shN_ada_mask
+                        
+                    data = {"step": step, "splats": self.splats.state_dict()}
+                    if cfg.pose_opt:
+                        if world_size > 1:
+                            data["pose_adjust"] = self.pose_adjust.module.state_dict()
+                        else:
+                            data["pose_adjust"] = self.pose_adjust.state_dict()
+                    if cfg.app_opt:
+                        if world_size > 1:
+                            data["app_module"] = self.app_module.module.state_dict()
+                        else:
+                            data["app_module"] = self.app_module.state_dict()
+
+                    if cfg.shN_ada_mask_opt and step > cfg.ada_mask_steps:
+                        data["shN_ada_mask"] = shN_ada_mask
+                    
+                    if cfg.compression_sim and cfg.entropy_model_opt and cfg.compression == "entropy_coding":
+                        for name, entropy_model in self.compression_sim_method.entropy_models.items():
+                            if entropy_model is not None:
+                                data[name+"_entropy_model"] = entropy_model.state_dict()
+
+                    torch.save(
+                        data, f"{self.ckpt_dir}/ckpt_{step}_rank{self.world_rank}.pt"
+                    )
+
+                # Turn Gradients into Sparse Tensor before running optimizer
+                if cfg.sparse_grad:
+                    assert cfg.packed, "Sparse gradients only work with packed mode."
+                    gaussian_ids = info["gaussian_ids"]
+                    for k in self.splats.keys():
+                        grad = self.splats[k].grad
+                        if grad is None or grad.is_sparse:
+                            continue
+                        self.splats[k].grad = torch.sparse_coo_tensor(
+                            indices=gaussian_ids[None],  # [1, nnz]
+                            values=grad[gaussian_ids],  # [nnz, ...]
+                            size=self.splats[k].size(),  # [N, ...]
+                            is_coalesced=len(Ks) == 1,
+                        )
 
             if cfg.visible_adam:
                 gaussian_cnt = self.splats.means.shape[0]
@@ -779,48 +967,80 @@ class Runner:
                 optimizer.zero_grad(set_to_none=True)
             for scheduler in schedulers:
                 scheduler.step()
+                # optimize
+                for optimizer in self.optimizers.values():
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+                for optimizer in self.pose_optimizers:
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+                for optimizer in self.app_optimizers:
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+                for optimizer in self.bil_grid_optimizers:
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+                for scheduler in schedulers:
+                    scheduler.step()
+                # (optional) entropy model params. optimize
+                if cfg.compression_sim:
+                    if cfg.entropy_model_opt:
+                        for name, optimizer in self.compression_sim_method.entropy_model_optimizers.items():
+                            if optimizer is not None:
+                                optimizer.step()
+                                optimizer.zero_grad(set_to_none=True)
+                        for name, scheduler in self.compression_sim_method.entropy_model_schedulers.items():
+                            if scheduler is not None and step > cfg.entropy_steps[name]:
+                                scheduler.step()
+                    # (optional) shN adaptive mask optimize
+                    if self.compression_sim_method.shN_ada_mask_opt and step > cfg.ada_mask_steps:
+                        self.compression_sim_method.shN_ada_mask_optimizer.step()
+                        self.compression_sim_method.shN_ada_mask_optimizer.zero_grad(set_to_none=True)
 
-            # Run post-backward steps after backward and optimizer
-            if isinstance(self.cfg.strategy, DefaultStrategy):
-                self.cfg.strategy.step_post_backward(
-                    params=self.splats,
-                    optimizers=self.optimizers,
-                    state=self.strategy_state,
-                    step=step,
-                    info=info,
-                    packed=cfg.packed,
-                )
-            elif isinstance(self.cfg.strategy, MCMCStrategy):
-                self.cfg.strategy.step_post_backward(
-                    params=self.splats,
-                    optimizers=self.optimizers,
-                    state=self.strategy_state,
-                    step=step,
-                    info=info,
-                    lr=schedulers[0].get_last_lr()[0],
-                )
-            else:
-                assert_never(self.cfg.strategy)
+                # Run post-backward steps after backward and optimizer
+                if isinstance(self.cfg.strategy, DefaultStrategy):
+                    self.cfg.strategy.step_post_backward(
+                        params=self.splats,
+                        optimizers=self.optimizers,
+                        state=self.strategy_state,
+                        step=step,
+                        info=info,
+                        packed=cfg.packed,
+                    )
+                elif isinstance(self.cfg.strategy, MCMCStrategy):
+                    self.cfg.strategy.step_post_backward(
+                        params=self.splats,
+                        optimizers=self.optimizers,
+                        state=self.strategy_state,
+                        step=step,
+                        info=info,
+                        lr=schedulers[0].get_last_lr()[0],
+                    )
+                else:
+                    assert_never(self.cfg.strategy)
+                
+                self.step_profiler()
 
-            # eval the full set
-            if step in [i - 1 for i in cfg.eval_steps]:
-                self.eval(step)
-                self.render_traj(step)
+                # eval the full set
+                if step in [i - 1 for i in cfg.eval_steps]:
+                    self.eval(step)
+                    self.render_traj(step)
 
-            # run compression
-            if cfg.compression is not None and step in [i - 1 for i in cfg.eval_steps]:
-                self.run_compression(step=step)
+                # run compression
+                if cfg.compression is not None and step in [i - 1 for i in cfg.eval_steps]:
+                    self.run_compression(step=step)
 
-            if not cfg.disable_viewer:
-                self.viewer.lock.release()
-                num_train_steps_per_sec = 1.0 / (time.time() - tic)
-                num_train_rays_per_sec = (
-                    num_train_rays_per_step * num_train_steps_per_sec
-                )
-                # Update the viewer state.
-                self.viewer.state.num_train_rays_per_sec = num_train_rays_per_sec
-                # Update the scene.
-                self.viewer.update(step, num_train_rays_per_step)
+                if not cfg.disable_viewer:
+                    self.viewer.lock.release()
+                    num_train_steps_per_sec = 1.0 / (time.time() - tic)
+                    num_train_rays_per_sec = (
+                        num_train_rays_per_step * num_train_steps_per_sec
+                    )
+                    # Update the viewer state.
+                    self.viewer.state.num_train_rays_per_sec = num_train_rays_per_sec
+                    # Update the scene.
+                    self.viewer.update(step, num_train_rays_per_step)
+        
 
     @torch.no_grad()
     def eval(self, step: int, stage: str = "val"):
@@ -862,8 +1082,9 @@ class Runner:
             canvas_list = [pixels, colors]
 
             if world_rank == 0:
-                # write images
-                canvas = torch.cat(canvas_list, dim=2).squeeze(0).cpu().numpy()
+                # write images 
+                # canvas = torch.cat(canvas_list, dim=2).squeeze(0).cpu().numpy() # side by side
+                canvas = canvas_list[1].squeeze(0).cpu().numpy() # signle image
                 canvas = (canvas * 255).astype(np.uint8)
                 imageio.imwrite(
                     f"{self.render_dir}/{stage}_step{step}_{i:04d}.png",
@@ -904,16 +1125,18 @@ class Runner:
             self.writer.flush()
 
     @torch.no_grad()
-    def render_traj(self, step: int):
+    def render_traj(self, step: int, stage: str = "val"):
         """Entry for trajectory rendering."""
         print("Running trajectory rendering...")
         cfg = self.cfg
         device = self.device
 
-        camtoworlds_all = self.parser.camtoworlds[5:-5]
+        num_imgs = len(self.parser.camtoworlds)
+
+        camtoworlds_all = self.parser.camtoworlds[: num_imgs//2]
         if cfg.render_traj_path == "interp":
             camtoworlds_all = generate_interpolated_path(
-                camtoworlds_all, 1
+                camtoworlds_all, 6 #1
             )  # [N, 3, 4]
         elif cfg.render_traj_path == "ellipse":
             height = camtoworlds_all[:, 2, 3].mean()
@@ -948,7 +1171,7 @@ class Runner:
         # save to video
         video_dir = f"{cfg.result_dir}/videos"
         os.makedirs(video_dir, exist_ok=True)
-        writer = imageio.get_writer(f"{video_dir}/traj_{step}.mp4", fps=30)
+        writer = imageio.get_writer(f"{video_dir}/{stage}_traj_{step}.mp4", fps=30)
         for i in tqdm.trange(len(camtoworlds_all), desc="Rendering trajectory"):
             camtoworlds = camtoworlds_all[i : i + 1]
             Ks = K[None]
@@ -969,11 +1192,12 @@ class Runner:
             canvas_list = [colors, depths.repeat(1, 1, 1, 3)]
 
             # write images
-            canvas = torch.cat(canvas_list, dim=2).squeeze(0).cpu().numpy()
+            # canvas = torch.cat(canvas_list, dim=2).squeeze(0).cpu().numpy()
+            canvas = canvas_list[0].squeeze(0).cpu().numpy()
             canvas = (canvas * 255).astype(np.uint8)
             writer.append_data(canvas)
         writer.close()
-        print(f"Video saved to {video_dir}/traj_{step}.mp4")
+        print(f"Video saved to {video_dir}/{stage}_traj_{step}.mp4")
 
     @torch.no_grad()
     def run_compression(self, step: int):
@@ -983,14 +1207,72 @@ class Runner:
 
         compress_dir = f"{cfg.result_dir}/compression/rank{world_rank}"
         os.makedirs(compress_dir, exist_ok=True)
-
-        self.compression_method.compress(compress_dir, self.splats)
+        # import pdb; pdb.set_trace()
+        self.run_param_distribution_vis(self.splats, save_dir=f"{cfg.result_dir}/visualization/raw")
+        
+        if isinstance(self.compression_method, PngCompression):
+            self.compression_method.compress(compress_dir, self.splats)
+        elif isinstance(self.compression_method, EntropyCodingCompression):
+            self.compression_method.compress(compress_dir, self.splats, self.entropy_models)
+        else:
+            raise NotImplementedError(f"The compression method is not implemented yet.")
 
         # evaluate compression
         splats_c = self.compression_method.decompress(compress_dir)
+        
+        self.run_param_distribution_vis(splats_c, save_dir=f"{cfg.result_dir}/visualization/quant")
+
         for k in splats_c.keys():
             self.splats[k].data = splats_c[k].to(self.device)
         self.eval(step=step, stage="compress")
+        self.render_traj(step=step, stage="compress")
+
+    @torch.no_grad()
+    def run_param_distribution_vis(self, param_dict: Dict[str, Tensor], save_dir: str):
+        import matplotlib.pyplot as plt
+
+        os.makedirs(save_dir, exist_ok=True)
+        for param_name, value in param_dict.items():
+            
+            tensor_np = value.flatten().detach().cpu().numpy()
+            min_val, max_val = tensor_np.min(), tensor_np.max()
+
+            plt.figure(figsize=(6, 4))
+            n, bins, patches = plt.hist(tensor_np, bins=50, density=False, alpha=0.7, color='b')
+
+            for count, bin_edge in zip(n, bins):
+                plt.text(bin_edge, count, f'{int(count)}', fontsize=8, va='bottom', ha='center')
+
+            plt.annotate(f'Min: {min_val:.2f}', xy=(min_val, 0), xytext=(min_val, max(n) * 0.1),
+                        arrowprops=dict(facecolor='green', shrink=0.05), fontsize=10, color='green')
+
+            plt.annotate(f'Max: {max_val:.2f}', xy=(max_val, 0), xytext=(max_val, max(n) * 0.1),
+                        arrowprops=dict(facecolor='red', shrink=0.05), fontsize=10, color='red')
+
+            plt.title(f'{param_name} Distribution')
+            plt.xlabel('Value')
+            plt.ylabel('Density')
+
+            plt.savefig(os.path.join(save_dir, f'{param_name}.png'))
+
+            plt.close()
+        
+        print(f"Histograms saved in '{save_dir}' directory.")
+    
+    def load_entropy_model_from_ckpt(self, ckpt: Dict, entropy_model_type: str):
+        self.entropy_models = {}
+        for name, value in ckpt.items():
+            if "_entropy_model" in name:
+                attr_name = name[:(len(name) - len("_entropy_model"))]
+                num_ch = ckpt["splats"][attr_name].shape[-1]
+                if entropy_model_type == "factorized_model":
+                    # TODO
+                    pass
+                elif entropy_model_type == "gaussian_model":
+                    entropy_model = Entropy_gaussian(channel=num_ch)
+                
+                entropy_model.load_state_dict(value)
+                self.entropy_models[attr_name] = entropy_model
 
     @torch.no_grad()
     def _viewer_render_fn(
@@ -1034,6 +1316,8 @@ def main(local_rank: int, world_rank, world_size: int, cfg: Config):
         runner.eval(step=step)
         runner.render_traj(step=step)
         if cfg.compression is not None:
+            if cfg.compression == "entropy_coding":
+                runner.load_entropy_model_from_ckpt(ckpts[0], cfg.entropy_model_type)
             runner.run_compression(step=step)
     else:
         runner.train()
