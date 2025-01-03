@@ -125,3 +125,11 @@ data
 results
 
 !examples/benchmarks/compression/results/
+
+setup_gscodec.py
+*.ipynb
+Readme_GSCodec.md 
+third_party
+temp
+stats
+figs
