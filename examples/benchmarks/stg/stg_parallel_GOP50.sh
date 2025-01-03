@@ -19,13 +19,13 @@ run_single_GOP() {
 
     echo "Running $SCENE"
 
-    # CUDA_VISIBLE_DEVICES=$GPU_ID python simple_trainer_STG.py compression_sim \
-    #     --model_path $RESULT_DIR/$SCENE/ \
-    #     --data_dir $SCENE_DIR/$SCENE/colmap_$START_FRAME \
-    #     --result_dir $RESULT_DIR/$SCENE/$START_FRAME/ \
-    #     --duration $NUM_FRAME \
-    #     --entropy_model_opt \
-    #     --rd_lambda 0.02
+    CUDA_VISIBLE_DEVICES=$GPU_ID python simple_trainer_STG.py compression_sim \
+        --model_path $RESULT_DIR/$SCENE/ \
+        --data_dir $SCENE_DIR/$SCENE/colmap_$START_FRAME \
+        --result_dir $RESULT_DIR/$SCENE/$START_FRAME/ \
+        --duration $NUM_FRAME \
+        --entropy_model_opt \
+        --rd_lambda 0.02
     
     CUDA_VISIBLE_DEVICES=$GPU_ID python simple_trainer_STG.py default \
         --model_path $RESULT_DIR/$SCENE/ \
