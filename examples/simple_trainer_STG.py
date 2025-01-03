@@ -84,7 +84,7 @@ class Config:
     source_path: str = ""
     model_path: str = ""
     images: str = "images"
-    resolution: int = 2 #-1
+    downscale_factor: int = 2 #-1
     white_background: bool = False
     veryrify_llff: int = 0
     eval: bool = True
@@ -95,7 +95,7 @@ class Config:
     # Optimization Params / op
     max_steps: int = 30_000
     init_opa: float = 0.1 # Initial opacity of GS
-    batch_size: int = 2 # TODO Do not support batch size = 1 for now
+    batch_size: int = 2 
     feature_dim: int = 3
     device: str = "cuda"
     global_scale: float = 1.0 # A global scaler that applies to the scene size related parameters
@@ -106,14 +106,15 @@ class Config:
     refine_stop_iter: int = 9_000 # STG changed this param from 15_000 to 9_000, comprared with 3dgs
     reset_every: int = 3_000
     refine_every: int = 100
+    pause_refine_after_reset: int = 0
     absgrad: bool = False
     packed: bool = False
     sparse_grad: bool = False
     antialiased: bool = False
     duration: int = 50 # 20 # number of frames to train
     ssim_lambda: float = 0.2 # Weight for SSIM loss
-    save_steps: List[int] = field(default_factory=lambda: [i for i in range(9_000, 30_001, 3_000)]) # Steps to save the model
-    eval_steps: List[int] = field(default_factory=lambda: [i for i in range(9_000, 30_001, 3_000)]) # Steps to evaluate the model # 7_000, 30_000
+    save_steps: List[int] = field(default_factory=lambda: [i for i in range(9_000, 75_001, 3_000)]) # Steps to save the model
+    eval_steps: List[int] = field(default_factory=lambda: [i for i in range(0, 75_001, 3_000)]) # Steps to evaluate the model # 7_000, 30_000
     # eval_steps: List[int] = field(default_factory=lambda: [1_000, 2_000, 3_000, 4_000, 5_000, 6_000, 7_000, 25_000, 30_000])
     # Number of densification
     desicnt: int = 6 # default: 6
@@ -215,15 +216,15 @@ def create_splats_with_optimizers(
     
     # Didn't introduce world_rank and world_size 
     N = points.shape[0]
-    # quats = torch.rand((N, 4))  # [N, 4]
-    quats = torch.zeros((N, 4))
+    # quats = torch.rand((N, 4))  
+    quats = torch.zeros((N, 4)) # [N, 4]
     quats[:, 0] = 1
     # opacities = torch.logit(torch.full((N,), init_opacity))  # [N,]
     opacities = inverse_sigmoid(0.1 * torch.ones(N,))
-    trbf_scale = torch.ones((N, 1))
+    trbf_scale = torch.log(torch.ones((N, 1))) # [N, 1]
     times = parser.timestamp 
     times = torch.tensor(times)
-    trbf_center = times.contiguous() 
+    trbf_center = times.contiguous() # [N, 1]
     motion = torch.zeros((N, 9))
     omega = torch.zeros((N, 4))
     
@@ -285,7 +286,7 @@ class Runner:
         # only enable when debug!!
         if cfg.enable_autograd_detect_anomaly:
             torch.autograd.set_detect_anomaly(True)
-        
+
         self.cfg = cfg
         # Write cfg file: Skipped
         self.device = self.cfg.device
@@ -310,10 +311,10 @@ class Runner:
         
         # Load data: Training data should contain initial points and colors.
         parser = Parser(model_path=self.cfg.model_path, source_path=self.cfg.data_dir, duration=cfg.duration, 
-                        shuffle=False, eval=self.cfg.eval, resolution=cfg.resolution, data_device='cpu')
+                        shuffle=False, eval=self.cfg.eval, downscale_factor=cfg.downscale_factor, data_device='cpu', test_view_id=cfg.test_view_id)
         self.parser = parser
         self.trainset = Dataset(parser=self.parser, split="train", num_views=cfg.batch_size, use_fake_length=True, fake_length=cfg.max_steps+100)
-        self.testset = Dataset(parser=self.parser, split="test", num_views=1)
+        self.testset = Dataset(parser=self.parser, split="test", num_views=len(cfg.test_view_id))
 
         self.trainloader = torch.utils.data.DataLoader(
             self.trainset,
@@ -352,7 +353,7 @@ class Runner:
         self.decoder_optimizer = torch.optim.Adam(self.decoder.parameters(), lr=0.0001)
         
         currentxyz = self.splats["means"]
-        maxx, maxy, maxz = torch.amax(currentxyz[:,0]), torch.amax(currentxyz[:,1]), torch.amax(currentxyz[:,2])# z wrong...
+        maxx, maxy, maxz = torch.amax(currentxyz[:,0]), torch.amax(currentxyz[:,1]), torch.amax(currentxyz[:,2])
         minx, miny, minz = torch.amin(currentxyz[:,0]), torch.amin(currentxyz[:,1]), torch.amin(currentxyz[:,2])
         self.maxbounds = [maxx, maxy, maxz]
         self.minbounds = [minx, miny, minz]
@@ -878,6 +879,13 @@ class Runner:
         ellipse_time = 0
         metrics = defaultdict(list)
         pbar = tqdm.tqdm(range(0, len(self.testloader)))
+
+        # save path
+        eval_save_path = f"{self.render_dir}/{stage}_step{step}"
+        os.makedirs(eval_save_path, exist_ok=True)
+
+        ## init writer(s) based on num. of test views
+        writers = [imageio.get_writer(f"{eval_save_path}/{stage}_step{step}_testv{i}.mp4", fps=30, quality=10) for i in range(len(cfg.test_view_id))]
         
         for t_idx, batch in enumerate(self.testloader): # t_idx
             
@@ -887,10 +895,6 @@ class Runner:
             timestamp = batch["timestamp"][0].float().to(device)
             rays = batch["ray"][0].float().to(device) 
             camtoworld = batch['camtoworld'][0].float().to(device)
-
-            # R = camtoworld.cpu().numpy()[0, :3,:3]
-            # T = torch.inverse(camtoworld).cpu().numpy()[0, :3,-1]
-            # new_rays = self.get_rays(R, T, Ks[0,0,0], Ks[0,1,1], width, height).float().to(device)
             
             torch.cuda.synchronize()
             tic = time.time()
@@ -906,29 +910,39 @@ class Runner:
             torch.cuda.synchronize()
             ellipse_time += time.time() - tic
 
-            colors = torch.clamp(colors, 0.0, 1.0)
+            colors = torch.clamp(colors, 0.0, 1.0) # colors: [N, H, W, C]
             canvas_list = [pixels, colors]
             
             desc = ""
             if world_rank == 0:
-                # write GT-vs-rendered image
                 try:
-                    # new version - fpng
-                    # canvas = torch.cat(canvas_list, dim=2).squeeze(0).contiguous().cpu().numpy() # fpnge needs [H,W,C]
-                    # import pdb; pdb.set_trace()
-                    canvas = canvas_list[-1].squeeze(0).contiguous().cpu().numpy()
-                    canvas = (canvas * 255).astype(np.uint8)
                     import fpnge
-                    png = fpnge.fromNP(canvas)
-                    with open(f"{self.render_dir}/{stage}_step{step}_{t_idx:04d}.png", 'wb') as f:
-                        f.write(png)
+                    canvases = torch.cat(canvas_list, dim=2) # canvas: [N, H, 2*W, C]
+                    for i in range(canvases.shape[0]): # loop on test views
+                        # save side-by-side comparison
+                        canvas = canvases[i].contiguous().cpu().numpy()
+                        canvas = (canvas * 255).astype(np.uint8)
+                        # new version - fpng
+                        
+                        png = fpnge.fromNP(canvas) # fpnge needs tensor in order as [H,W,C]
+                        # with open(f"{self.render_dir}/{stage}_step{step}_{t_idx:04d}_testv{i}.png", 'wb') as f:
+                        #     f.write(png)
+                        with open(f"{eval_save_path}/sidebyside_testv{i}_fid{t_idx:04d}.png", 'wb') as f:
+                            f.write(png)
 
-                    canvas = canvas_list[0].squeeze(0).contiguous().cpu().numpy()
-                    canvas = (canvas * 255).astype(np.uint8)
-                    import fpnge
-                    png = fpnge.fromNP(canvas)
-                    with open(f"{self.render_dir}/{stage}_step{step}_{t_idx:04d}_gt.png", 'wb') as f:
-                        f.write(png)
+                        # save gt
+                        gt = pixels[i].contiguous().cpu().numpy()
+                        gt = (gt * 255).astype(np.uint8)
+                        png = fpnge.fromNP(gt)
+                        with open(f"{eval_save_path}/gt_testv{i}_fid{t_idx:04d}.png", 'wb') as f:
+                            f.write(png)
+                        
+                        # save rendered
+                        rendered = colors[i].contiguous().cpu().numpy()
+                        rendered = (rendered * 255).astype(np.uint8)
+                        png = fpnge.fromNP(rendered)
+                        with open(f"{eval_save_path}/rendered_testv{i}_fid{t_idx:04d}.png", 'wb') as f:
+                            f.write(png)
 
                 except:
                     # original version - imageio
@@ -938,6 +952,12 @@ class Runner:
                         f"{self.render_dir}/{stage}_step{step}_{t_idx:04d}.png",
                         canvas,
                     )
+
+                # save rendered test-view videos
+                for i in range(colors.shape[0]):
+                    color = colors[i].cpu().numpy()
+                    color = (color * 255).astype(np.uint8)
+                    writers[i].append_data(color)
 
                 # write difference image
                 # difference = abs(colors - pixels).squeeze().detach().cpu().numpy()
@@ -955,6 +975,10 @@ class Runner:
             pbar.set_description(desc)
             pbar.update(1)
         pbar.close()
+
+        for i, writer in enumerate(writers):
+            writer.close()
+            print(f"Video saved to {self.render_dir}/{stage}_step{step}_testv{i}.mp4")
 
         if world_rank == 0:
             ellipse_time /= len(self.testloader)
@@ -1221,9 +1245,11 @@ def main(cfg: Config):
             runner.splats[k].data = torch.cat([ckpt["splats"][k] for ckpt in ckpts])
         runner.decoder.load_state_dict(ckpts[0]["decoder"])
         step = ckpts[0]["step"]
-        runner.render_traj(step=step)
-        # runner.eval(step=step)
+        print(f"Evaluate ckpt saved at step {step}")
+        # runner.render_traj(step=step)
+        runner.eval(step=step)
         if cfg.compression is not None:
+            print(f"Compress ckpt saved at step {step}")
             runner.run_compression(step=step)
 
     else:

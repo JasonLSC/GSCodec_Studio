@@ -150,7 +150,6 @@ def split(
     sel = torch.where(mask)[0]
     rest = torch.where(~mask)[0]
 
-    # spatial resampling
     scales = torch.exp(params["scales"][sel])
     quats = F.normalize(params["quats"][sel], dim=-1)
     rotmats = normalized_quat_to_rotmat(quats)  # [N, 3, 3]

@@ -131,6 +131,7 @@ setup_gscodec.py
 
 figs
 stats
+temp
 Readme_GSCodec.md
 
 !examples/benchmarks/compression/results/
