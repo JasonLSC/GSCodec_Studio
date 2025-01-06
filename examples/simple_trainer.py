@@ -847,15 +847,6 @@ class Runner:
                     desc += f"pose err={pose_err.item():.6f}| "
                 pbar.set_description(desc)
 
-                # write images (gt and render)
-                # if world_rank == 0 and step % 800 == 0:
-                #     canvas = torch.cat([pixels, colors], dim=2).detach().cpu().numpy()
-                #     canvas = canvas.reshape(-1, *canvas.shape[2:])
-                #     imageio.imwrite(
-                #         f"{self.render_dir}/train_rank{self.world_rank}.png",
-                #         (canvas * 255).astype(np.uint8),
-                #     )
-
                 # tensorboard monitor
                 if world_rank == 0 and cfg.tb_every > 0 and step % cfg.tb_every == 0:
                     mem = torch.cuda.max_memory_allocated() / 1024**3
@@ -948,41 +939,23 @@ class Runner:
                             is_coalesced=len(Ks) == 1,
                         )
 
-            # gradient-based adaptive mask check
-            # if cfg.shN_ada_mask_opt and cfg.shN_ada_mask_strategy == "gradient":
-
-
-            if cfg.visible_adam:
-                gaussian_cnt = self.splats.means.shape[0]
-                if cfg.packed:
-                    visibility_mask = torch.zeros_like(
-                        self.splats["opacities"], dtype=bool
-                    )
-                    visibility_mask.scatter_(0, info["gaussian_ids"], 1)
-                else:
-                    visibility_mask = (info["radii"] > 0).any(0)
-
-            # optimize
-            for optimizer in self.optimizers.values():
+                # logic for 'visible_adam'
                 if cfg.visible_adam:
-                    optimizer.step(visibility_mask)
-                else:
-                    optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-            for optimizer in self.pose_optimizers:
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-            for optimizer in self.app_optimizers:
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-            for optimizer in self.bil_grid_optimizers:
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-            for scheduler in schedulers:
-                scheduler.step()
+                    gaussian_cnt = self.splats.means.shape[0]
+                    if cfg.packed:
+                        visibility_mask = torch.zeros_like(
+                            self.splats["opacities"], dtype=bool
+                        )
+                        visibility_mask.scatter_(0, info["gaussian_ids"], 1)
+                    else:
+                        visibility_mask = (info["radii"] > 0).any(0)
+
                 # optimize
                 for optimizer in self.optimizers.values():
-                    optimizer.step()
+                    if cfg.visible_adam:
+                        optimizer.step(visibility_mask)
+                    else:
+                        optimizer.step()
                     optimizer.zero_grad(set_to_none=True)
                 for optimizer in self.pose_optimizers:
                     optimizer.step()
