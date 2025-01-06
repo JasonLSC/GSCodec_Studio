@@ -132,6 +132,8 @@ class Config:
     shN_ada_mask_opt: bool = False
     # Steps to enable shN adaptive mask
     ada_mask_steps: int = 10_000
+    # Strategy to obtain adaptive mask
+    shN_ada_mask_strategy: Optional[str] = "learnable" # "gradient"
     
     # Render trajectory path
     render_traj_path: str = "interp"
@@ -441,7 +443,6 @@ class Runner:
                 raise ValueError(f"Unknown compression strategy: {cfg.compression}")
         
         if cfg.compression_sim:
-            # TODO: bad impl. 
             cap_max = cfg.strategy.cap_max if cfg.strategy.cap_max is not None else None
             self.compression_sim_method = CompressionSimulation(cfg.entropy_model_opt, 
                                                     cfg.entropy_model_type,
@@ -449,7 +450,11 @@ class Runner:
                                                     self.device, 
                                                     cfg.shN_ada_mask_opt,
                                                     cfg.ada_mask_steps,
+                                                    cfg.shN_ada_mask_strategy,
                                                     cap_max=cap_max,)
+            if cfg.shN_ada_mask_opt and cfg.shN_ada_mask_strategy == "gradient":
+                self.compression_sim_method.register_shN_gradient_threshold_hook(self.splats["shN"])
+
             if cfg.entropy_model_opt:
                 selected_key = min((k for k, v in cfg.entropy_steps.items() if v > 0), key=lambda k: cfg.entropy_steps[k])
                 self.entropy_min_step = cfg.entropy_steps[selected_key]
@@ -875,8 +880,11 @@ class Runner:
                             self.writer.add_histogram("train_hist/sh0", self.splats["sh0"], step)
                             if total_esti_bits > 0:
                                 self.writer.add_scalar("train/bpp_loss", total_esti_bits.item(), step)
-                        if self.compression_sim_method.shN_ada_mask_opt and step > cfg.ada_mask_steps:
-                            self.writer.add_scalar("train/ada_mask", self.compression_sim_method.shN_ada_mask.get_mask_ratio(), step)
+                        if self.compression_sim_method.shN_ada_mask_opt and cfg.shN_ada_mask_strategy == "learnable" and step > cfg.ada_mask_steps:
+                            self.writer.add_scalar("train/ada_mask_ratio", self.compression_sim_method.shN_ada_mask.get_mask_ratio(), step)
+                        if self.compression_sim_method.shN_ada_mask_opt and cfg.shN_ada_mask_strategy == "gradient":
+                            mask_ratio = (self.splats["shN"] == 0).all(dim=-1).all(dim=-1).sum() / self.splats["shN"].size(0)
+                            self.writer.add_scalar("train/ada_mask_ratio", mask_ratio, step)
                         
                     self.writer.add_histogram("train_hist/means", self.splats["means"], step)
                     self.writer.flush()
@@ -899,7 +907,8 @@ class Runner:
                     if cfg.shN_ada_mask_opt and step > cfg.ada_mask_steps:
                         shN_ada_mask = self.compression_sim_method.shN_ada_mask.get_binary_mask()
                         self.splats["shN"].data = self.splats["shN"].data * shN_ada_mask
-                        
+                    
+                    # prepare data to be saved
                     data = {"step": step, "splats": self.splats.state_dict()}
                     if cfg.pose_opt:
                         if world_size > 1:
@@ -938,6 +947,10 @@ class Runner:
                             size=self.splats[k].size(),  # [N, ...]
                             is_coalesced=len(Ks) == 1,
                         )
+
+            # gradient-based adaptive mask check
+            # if cfg.shN_ada_mask_opt and cfg.shN_ada_mask_strategy == "gradient":
+
 
             if cfg.visible_adam:
                 gaussian_cnt = self.splats.means.shape[0]
