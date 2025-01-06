@@ -1,7 +1,7 @@
 # ----------------- Training Setting-------------- #
 SCENE_DIR="data/tandt"
 # eval all 9 scenes for benchmarking
-SCENE_LIST="truck" #  truck 
+SCENE_LIST="truck train" #  truck 
 # SCENE_LIST="garden bicycle stump bonsai counter kitchen room treehill flowers"
 
 # # 0.36M GSs

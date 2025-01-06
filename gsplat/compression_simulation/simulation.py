@@ -327,31 +327,29 @@ class CompressionSimulation:
 
         return param, None
     
-    def register_shN_gradient_threshold_hook(self, param: torch.nn.Parameter) -> None:
-        def create_gradient_hook(param):
-            def hook(grad):
-                param_value = param.data
 
-                # Check which splat's shN are all zero
-                zero_mask = (param_value == 0).all(dim=-1).all(dim=-1)
+    def shN_gradient_threshold(self, param: torch.nn.Parameter, step: int) -> None:
+        param_value = param.data
+        
+        # Check which splat's shN are all zero
+        zero_mask = (param_value == 0).all(dim=-1).all(dim=-1)
 
-                # Calculate proportion of splats with non-zero shN
-                non_zero_mask_ratio = 1 - zero_mask.sum()/zero_mask.size(0)
+        # Calculate proportion of splats with non-zero shN
+        non_zero_mask_ratio = 1 - zero_mask.sum()/zero_mask.size(0)
+        # print(f"Vaild shN ratio: {non_zero_mask_ratio*100:.3f}%")
 
-                # Dynamically set threshold based on non-zero ratio,
-                gradient_threshold = 1e-6 if non_zero_mask_ratio < 0.15 else 100 # 100, relatively equals to inf
+        # Dynamically set threshold based on non-zero ratio,
+        gradient_threshold = 5e-3 if non_zero_mask_ratio < 0.15 else 100 # 100, relatively equals to inf
 
-                # Identify gradients below threshold
-                low_gradient_mask = torch.norm(grad, p=2, dim=(-2,-1)) < gradient_threshold 
+        # Identify gradients below threshold
+        low_gradient_mask = torch.norm(param.grad, p=2, dim=(-2,-1)) < gradient_threshold 
+        # if step >= 1000:
+        #     import pdb; pdb.set_trace()
 
-                # Zero out gradients where both conditions are met
-                final_mask = torch.logical_and(zero_mask, low_gradient_mask)
-                grad[final_mask] = 0
-
-                return grad
-            return hook
-
-        param.register_hook(create_gradient_hook(param))
+        # Zero out gradients where both conditions are met
+        final_mask = torch.logical_and(zero_mask, low_gradient_mask)
+        # final_mask = low_gradient_mask
+        param.grad[final_mask] = 0
 
 
 # STE families

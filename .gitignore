@@ -137,3 +137,5 @@ temp
 
 !examples/benchmarks/compression/results/
 .github/
+
+gsc_metric
