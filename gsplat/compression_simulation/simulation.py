@@ -339,7 +339,7 @@ class CompressionSimulation:
         # print(f"Vaild shN ratio: {non_zero_mask_ratio*100:.3f}%")
 
         # Dynamically set threshold based on non-zero ratio,
-        gradient_threshold = 5e-3 if non_zero_mask_ratio < 0.15 else 100 # 100, relatively equals to inf
+        gradient_threshold = 2e-3 if non_zero_mask_ratio < 0.10 else 100 # 100, relatively equals to inf
 
         # Identify gradients below threshold
         low_gradient_mask = torch.norm(param.grad, p=2, dim=(-2,-1)) < gradient_threshold 

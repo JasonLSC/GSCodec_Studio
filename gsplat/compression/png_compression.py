@@ -93,7 +93,6 @@ class PngCompression:
         # Oulier filtering
         outlier_filtering = True
         if outlier_filtering:
-            # import pdb; pdb.set_trace()
             vaild_mask, splats = filter_splats(splats)
 
         n_gs = len(splats["means"])
