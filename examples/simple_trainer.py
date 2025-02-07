@@ -2,6 +2,7 @@ import json
 import math
 import os
 import time
+import shutil
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from collections import defaultdict
@@ -40,7 +41,7 @@ from lib_bilagrid import (
     total_variation_loss,
 )
 
-from gsplat.compression import PngCompression
+from gsplat.compression import PngCompression, HevcCompression
 from gsplat.distributed import cli
 from gsplat.rendering import rasterization
 from gsplat.strategy import DefaultStrategy, MCMCStrategy
@@ -96,7 +97,9 @@ class Config:
     # Path to the .pt files. If provide, it will skip training and run evaluation only.
     ckpt: Optional[List[str]] = None
     # Name of compression strategy to use
-    compression: Optional[Literal["png", "entropy_coding"]] = None
+    compression: Optional[Literal["png", "entropy_coding", "hevc"]] = None
+    # Quantization parameters when set to hevc
+    qp: Optional[int] = None
 
     # Enable profiler
     profiler_enabled: bool = False
@@ -353,6 +356,38 @@ def create_splats_with_optimizers(
     }
     return splats, optimizers
 
+def save_ply(splats: torch.nn.ParameterDict, path: str):
+    from plyfile import PlyData, PlyElement
+
+    means = splats["means"].detach().cpu().numpy()
+    normals = np.zeros_like(means)
+    sh0 = splats["sh0"].detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+    shN = splats["shN"].detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+    opacities = splats["opacities"].detach().unsqueeze(1).cpu().numpy()
+    scales = splats["scales"].detach().cpu().numpy()
+    quats = splats["quats"].detach().cpu().numpy()
+
+    def construct_list_of_attributes(splats):
+        l = ['x', 'y', 'z', 'nx', 'ny', 'nz']
+
+        for i in range(splats["sh0"].shape[1]*splats["sh0"].shape[2]):
+            l.append('f_dc_{}'.format(i))
+        for i in range(splats["shN"].shape[1]*splats["shN"].shape[2]):
+            l.append('f_rest_{}'.format(i))
+        l.append('opacity')
+        for i in range(splats["scales"].shape[1]):
+            l.append('scale_{}'.format(i))
+        for i in range(splats["quats"].shape[1]):
+            l.append('rot_{}'.format(i))
+        return l
+
+    dtype_full = [(attribute, 'f4') for attribute in construct_list_of_attributes(splats)]
+
+    elements = np.empty(means.shape[0], dtype=dtype_full)
+    attributes = np.concatenate((means, normals, sh0, shN, opacities, scales, quats), axis=1)
+    elements[:] = list(map(tuple, attributes))
+    el = PlyElement.describe(elements, 'vertex')
+    PlyData([el]).write(path)
 
 class Runner:
     """Engine for training and testing."""
@@ -439,6 +474,8 @@ class Runner:
                 self.compression_method = PngCompression()
             elif  cfg.compression == "entropy_coding":
                 self.compression_method = EntropyCodingCompression()
+            elif cfg.compression == "hevc":
+                self.compression_method = HevcCompression(qp=cfg.qp)
             else:
                 raise ValueError(f"Unknown compression strategy: {cfg.compression}")
         
@@ -1198,14 +1235,19 @@ class Runner:
         world_rank = self.world_rank
 
         compress_dir = f"{cfg.result_dir}/compression/rank{world_rank}"
-        os.makedirs(compress_dir, exist_ok=True)
-        # import pdb; pdb.set_trace()
+
+        if os.path.exists(compress_dir):
+            shutil.rmtree(compress_dir)
+        os.makedirs(compress_dir)
+
         self.run_param_distribution_vis(self.splats, save_dir=f"{cfg.result_dir}/visualization/raw")
         
         if isinstance(self.compression_method, PngCompression):
             self.compression_method.compress(compress_dir, self.splats)
         elif isinstance(self.compression_method, EntropyCodingCompression):
             self.compression_method.compress(compress_dir, self.splats, self.entropy_models)
+        elif isinstance(self.compression_method, HevcCompression):
+            self.compression_method.compress(compress_dir, self.splats)
         else:
             raise NotImplementedError(f"The compression method is not implemented yet.")
 
@@ -1259,7 +1301,12 @@ class Runner:
                 num_ch = ckpt["splats"][attr_name].shape[-1]
                 if entropy_model_type == "factorized_model":
                     # TODO
-                    pass
+                    if attr_name == "scales" or attr_name == "sh0":
+                        filters = (3, 3)
+                    else:
+                        filters = (3, 3, 3)
+                    entropy_model = Entropy_factorized_optimized_refactor(channel=num_ch, filters=filters)
+
                 elif entropy_model_type == "gaussian_model":
                     entropy_model = Entropy_gaussian(channel=num_ch)
                 
@@ -1286,6 +1333,17 @@ class Runner:
             radius_clip=3.0,  # skip GSs that have small image radius (in pixels)
         )  # [1, H, W, 3]
         return render_colors[0].cpu().numpy()
+    
+    @torch.no_grad()
+    def save_params_into_ply_file(
+        self
+    ):
+        """Save parameters of Gaussian Splats into .ply file"""
+        ply_dir = f"{cfg.result_dir}/ply"
+        os.makedirs(ply_dir, exist_ok=True)
+        ply_file = ply_dir + "/splats.ply"
+        save_ply(self.splats, ply_file)
+        print(f"Saved parameters of splats into file: {ply_file}.")
 
 
 def main(local_rank: int, world_rank, world_size: int, cfg: Config):
@@ -1305,8 +1363,9 @@ def main(local_rank: int, world_rank, world_size: int, cfg: Config):
         for k in runner.splats.keys():
             runner.splats[k].data = torch.cat([ckpt["splats"][k] for ckpt in ckpts])
         step = ckpts[0]["step"]
-        runner.eval(step=step)
-        runner.render_traj(step=step)
+        # runner.save_params_into_ply_file()
+        # runner.eval(step=step)
+        # runner.render_traj(step=step)
         if cfg.compression is not None:
             if cfg.compression == "entropy_coding":
                 runner.load_entropy_model_from_ckpt(ckpts[0], cfg.entropy_model_type)

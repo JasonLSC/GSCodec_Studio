@@ -1,7 +1,7 @@
 # ----------------- Training Setting-------------- #
 SCENE_DIR="data/tandt"
 # eval all 9 scenes for benchmarking
-SCENE_LIST="train truck" #  truck
+SCENE_LIST="truck" # train truck
 # SCENE_LIST="garden bicycle stump bonsai counter kitchen room treehill flowers"
 
 # # 0.36M GSs
@@ -41,14 +41,15 @@ run_single_scene() {
     echo "Running $SCENE on GPU: $GPU_ID"
 
     # train without eval
-    CUDA_VISIBLE_DEVICES=$GPU_ID python simple_trainer.py mcmc --eval_steps -1 --disable_viewer --data_factor 1 \
-        --strategy.cap-max $CAP_MAX \
-        --data_dir $SCENE_DIR/$SCENE/ \
-        --result_dir $RESULT_DIR/$SCENE/ \
-        --compression_sim \
-        --entropy_model_opt \
-        --rd_lambda $RD_LAMBDA \
-        --shN_ada_mask_opt
+    # CUDA_VISIBLE_DEVICES=$GPU_ID python simple_trainer.py mcmc --eval_steps -1 --disable_viewer --data_factor 1 \
+    #     --strategy.cap-max $CAP_MAX \
+    #     --data_dir $SCENE_DIR/$SCENE/ \
+    #     --result_dir $RESULT_DIR/$SCENE/ \
+    #     --compression_sim \
+    #     --entropy_model_opt \
+    #     --rd_lambda $RD_LAMBDA \
+    #     --shN_ada_mask_opt \
+    #     --compression entropy_coding
 
 
     # eval: use vgg for lpips to align with other benchmarks
@@ -57,8 +58,8 @@ run_single_scene() {
         --data_dir $SCENE_DIR/$SCENE/ \
         --result_dir $RESULT_DIR/$SCENE/ \
         --lpips_net vgg \
-        --compression png \
-        --ckpt $RESULT_DIR/$SCENE/ckpts/ckpt_29999_rank0.pt
+        --ckpt $RESULT_DIR/$SCENE/ckpts/ckpt_29999_rank0.pt \
+        --compression entropy_coding
     
 }
 # ----------------- Main Job --------------------- #
@@ -76,7 +77,7 @@ do
     SCENE_IDX=$((SCENE_IDX + 1))
     {
         run_single_scene ${GPU_LIST[$SCENE_IDX]} $SCENE
-    } &
+    } #&
 
 done
 

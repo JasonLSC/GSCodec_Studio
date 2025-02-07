@@ -56,10 +56,10 @@ class EntropyCodingCompression:
     def _get_compress_fn(self, param_name: str) -> Callable:
         compress_fn_map = {
             "means": _compress_png_16bit,
-            "scales": _compress_gaussian_ans,
-            "quats": _compress_png_kbit,
+            "scales": _compress_factorized_ans,
+            "quats": _compress_factorized_ans,
             "opacities": _compress_png,
-            "sh0": _compress_gaussian_ans,
+            "sh0": _compress_png,
             "shN": _compress_masked_kmeans,
         }
         if param_name in compress_fn_map:
@@ -70,10 +70,10 @@ class EntropyCodingCompression:
     def _get_decompress_fn(self, param_name: str) -> Callable:
         decompress_fn_map = {
             "means": _decompress_png_16bit,
-            "scales": _decompress_gaussian_ans,
-            "quats": _compress_png_kbit,
+            "scales": _decompress_factorized_ans,
+            "quats": _decompress_factorized_ans,
             "opacities": _decompress_png,
-            "sh0": _decompress_gaussian_ans,
+            "sh0": _decompress_png,
             "shN": _decompress_masked_kmeans,
         }
         if param_name in decompress_fn_map:
@@ -124,7 +124,7 @@ class EntropyCodingCompression:
             }
             if param_name in entropy_models:
                 kwargs.update({"entropy_model": entropy_models[param_name]})
-                decoded_means = self.get_decompressed_means(compress_dir)
+                # decoded_means = self.get_decompressed_means(compress_dir)
                 kwargs.update({"decoded_means": inverse_log_transform(splats["means"])})
 
             meta[param_name] = compress_fn(
@@ -258,6 +258,9 @@ def _get_prob(symbols: np.array, bitwidth: int=8) -> np.array:
 
     return stacked_prob_npy
 
+def _get_likelihood(symbols: np.array, bitwidth: int=8) -> np.array:
+    pass
+
 def _categorical_ans_encode(symbols: np.array, probabilities: np.array, save_path:str):
     num_symbols = symbols.shape[-1]
 
@@ -294,6 +297,7 @@ def _compress_factorized_ans(
     Returns:
         Dict[str, Any]: metadata
     """
+    print("Compressing:", param_name)
 
     if torch.numel == 0:
         meta = {
@@ -301,15 +305,43 @@ def _compress_factorized_ans(
             "dtype": str(params.dtype).split(".")[1],
         }
         return meta
+    
+
 
     mins = torch.amin(params, dim=0)
     maxs = torch.amax(params, dim=0)
     params_norm = (params - mins) / (maxs - mins)
     params_norm = params_norm.detach().cpu().numpy()
 
+    # def get_quantized_value(mins, maxs, num_ch=3):
+    #     tensor = torch.arange(0, 256).unsqueeze(1).repeat(1, num_ch).to(mins.device) # [256, 3]
+    #     q_step = (maxs - mins)/(2**8 - 1)
+
+    #     quantized_value = mins + tensor * q_step
+
+    #     return quantized_value, q_step
+
+    # q_value, q_step = get_quantized_value(mins, maxs)
+
+    # entropy_model = kwargs["entropy_model"].to(q_value.device)
+    # import pdb; pdb.set_trace()
+    # # factorized 预测
+    # prob = entropy_model.get_likelihood(q_value, q_step)
+    # prob = prob.t() # [2**8, C] -> [C, 2**8]
+
+    # 从这里开始
+    if param_name == "sh0":
+        params_norm = params_norm.squeeze(1)
     symbols = (params_norm * (2**8 - 1)).round().astype(np.int32)
-    prob = _get_prob(symbols, 8)
+    
+    # 统计
+    prob = _get_prob(symbols, 8) # [C, 2**8]
+    if isinstance(prob, torch.Tensor):
+        prob = prob.contiguous().detach().cpu().numpy()
     np.save(os.path.join(compress_dir, f"{param_name}_prob.npy"), prob)
+    # prob should be like CDF
+    # print(prob.shape, prob.dtype)
+    print(symbols.shape, symbols.dtype)
     _categorical_ans_encode(symbols.transpose(), prob, os.path.join(compress_dir, f"{param_name}.bin"))
 
     meta = {
@@ -333,7 +365,8 @@ def _decompress_factorized_ans(compress_dir: str, param_name: str, meta: Dict[st
         Tensor: parameters
     """
     import imageio.v2 as imageio
-
+    if param_name == "sh0":
+        import pdb; pdb.set_trace()
     if not np.all(meta["shape"]):
         params = torch.zeros(meta["shape"], dtype=getattr(torch, meta["dtype"]))
         return meta

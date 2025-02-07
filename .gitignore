@@ -139,3 +139,6 @@ temp
 .github/
 
 gsc_utils
+examples/benchmarks/compression/mpeg_exp
+examples/benchmarks/compression/rebuttal
+examples/benchmarks/viewer

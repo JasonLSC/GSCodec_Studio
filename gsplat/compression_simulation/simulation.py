@@ -139,9 +139,11 @@ class CompressionSimulation:
             # get scheduler
             self.entropy_model_schedulers = {}
             for k, v in self.entropy_models.items():
-                if isinstance(v, Entropy_factorized) or isinstance(v, Entropy_factorized_optimized) or isinstance(v, Entropy_factorized_optimized_refactor):
-                    # TODO: scheduler for factorized
-                    pass
+                if isinstance(v, Entropy_factorized) or \
+                    isinstance(v, Entropy_factorized_optimized) or \
+                    isinstance(v, Entropy_factorized_optimized_refactor):
+                        # TODO: scheduler for factorized
+                        pass
                 elif isinstance(v, Entropy_gaussian):
                     v_sch = torch.optim.lr_scheduler.ExponentialLR(
                         self.entropy_model_optimizers[k], gamma=0.01 ** (1.0 / (30000 - entropy_steps[k]))
