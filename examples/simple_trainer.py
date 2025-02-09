@@ -58,17 +58,12 @@ class ProfilerConfig:
             torch.profiler.ProfilerActivity.CUDA,
         ]
         
-        # 基础配置
-        self.wait = 1      # 开始记录前等待的步数
-        self.warmup = 2    # 预热步数
-        self.active = 30_000    # 实际分析的步数
-        # self.repeat = 2    # 重复次数
-        # self.skip_first = 10  # 跳过前N步（可选）
+        self.wait = 1 
+        self.warmup = 2 
+        self.active = 30_000 
         
-        # 创建schedule
         self.schedule = self._create_schedule()
         
-        # 其他profiler设置
         self.on_trace_ready = torch.profiler.tensorboard_trace_handler('./log/profiler')
         self.record_shapes = True
         self.profile_memory = True
@@ -79,8 +74,6 @@ class ProfilerConfig:
             wait=self.wait,
             warmup=self.warmup,
             active=self.active,
-            # repeat=self.repeat,
-            # skip_first=self.skip_first
         )
     
     def update_schedule(self, **kwargs):

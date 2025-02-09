@@ -161,10 +161,9 @@ class Entropy_factorized_optimized(nn.Module):
         else:
             Q = torch.tensor([Q], device=x.device)
 
-        # [N, C] -> [C, 1, N], batch维度移到最后以提高内存访问效率
+        # [N, C] -> [C, 1, N]
         x = x.t().unsqueeze(1)
 
-        # 预计算公共部分
         half_Q = 0.5 * Q.detach()
         x_lower = x - half_Q
         x_upper = x + half_Q
@@ -209,10 +208,9 @@ class Entropy_factorized_optimized_refactor(Entropy_factorized_optimized):
         else:
             Q = torch.tensor([Q], device=x.device)
 
-        # [N, C] -> [C, 1, N], batch维度移到最后以提高内存访问效率
+        # [N, C] -> [C, 1, N]
         x = x.t().unsqueeze(1)
 
-        # 预计算公共部分
         half_Q = 0.5 * Q.detach()
         x_lower = x - half_Q
         x_upper = x + half_Q
@@ -265,10 +263,9 @@ class Entropy_factorized_optimized_refactor(Entropy_factorized_optimized):
         else:
             Q = torch.tensor([Q], device=x.device)
 
-        # [N, C] -> [C, 1, N], batch维度移到最后以提高内存访问效率
+        # [N, C] -> [C, 1, N], 
         x = x.t().unsqueeze(1)
 
-        # 预计算公共部分
         half_Q = 0.5 * Q.detach()
         x_lower = x - half_Q
         x_upper = x + half_Q
@@ -346,23 +343,6 @@ class Entropy_gaussian(nn.Module):
         scales = torch.clamp(scales, min=1e-9)
 
         return means, scales
-
-# class Low_bound(torch.autograd.Function):
-#     @staticmethod
-#     def forward(ctx, x):
-#         ctx.save_for_backward(x)
-#         x = torch.clamp(x, min=1e-6)
-#         return x
-
-#     @staticmethod
-#     def backward(ctx, g):
-#         x, = ctx.saved_tensors
-#         grad1 = g.clone()
-#         grad1[x < 1e-6] = 0
-#         pass_through_if = np.logical_or(
-#             x.cpu().numpy() >= 1e-6, g.cpu().numpy() < 0.0)
-#         t = torch.Tensor(pass_through_if+0.0).cuda()
-#         return grad1 * t
     
 def lower_bound_fwd(x: Tensor, bound: Tensor) -> Tensor:
     return torch.max(x, bound)
