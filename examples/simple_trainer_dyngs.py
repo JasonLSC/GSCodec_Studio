@@ -181,8 +181,15 @@ class Config:
     # Steps to enable shN adaptive mask
     ada_mask_steps: int = 10_000
 
-    # Enable torch.autograd.detect_anomaly ?
+    # Enable torch.autograd.detect_anomaly 
     enable_autograd_detect_anomaly: bool = False
+
+    # Enable exporting dynamic splats to per-frame ply files
+    enable_dyn_splats_export: bool = True
+    # Time-variant opacity based pruning
+    temp_opa_vis_pruning: bool = True
+    # ply file saving mode
+    sliced_splats_saving_mode: Literal["splats", "pcd"] = "splats"
     
 
 def create_splats_with_optimizers(
@@ -1173,10 +1180,10 @@ class Runner:
 
         for f_id in range(cfg.duration):
             timestamp = f_id/cfg.duration
-            sliced_splats = self.get_sliced_splats_from_dyn_splats(self.splats, timestamp)
+            sliced_splats = self.get_sliced_splats_from_dyn_splats(self.splats, timestamp, self.cfg.temp_opa_vis_pruning)
 
             ply_filename = ply_dir + f"/{f_id:03d}.ply"
-            self.save_static_splats_to_ply(ply_filename, sliced_splats)
+            self.save_static_splats_to_ply(ply_filename, sliced_splats, mode=self.cfg.sliced_splats_saving_mode)
         
     
     @torch.no_grad()
@@ -1213,7 +1220,7 @@ class Runner:
         means_motion = means + motion[:, 0:3] * tforpoly + motion[:, 3:6] * tforpoly * tforpoly + motion[:, 6:9] * tforpoly *tforpoly * tforpoly
         # Calculate rotations
         rotations = torch.nn.functional.normalize(quats + tforpoly * omega)
-
+        import pdb; pdb.set_trace()
         if opa_vis_mask:
             vis_mask = trbfoutput.squeeze() > 0.05
             means_motion = means_motion[vis_mask]
@@ -1297,18 +1304,18 @@ def main(cfg: Config):
         runner.decoder.load_state_dict(ckpts[0]["decoder"])
         step = ckpts[0]["step"]
 
-        # print(f"Evaluate ckpt saved at step {step}")
-        # runner.eval(step=step)
+        print(f"Evaluate ckpt saved at step {step}")
+        runner.eval(step=step)
 
         # print(f"Render trajectory using ckpt saved at step {step}")
         # runner.render_traj(step=step)
+        if cfg.enable_dyn_splats_export:
+            print(f"Save .ply files using ckpt saved at step {step}")
+            runner.export_dyn_splats_to_ply_sequence()
 
-        print(f"Save .ply files using ckpt saved at step {step}")
-        runner.export_dyn_splats_to_ply_sequence()
-
-        # if cfg.compression is not None:
-        #     print(f"Compress ckpt saved at step {step}")
-        #     runner.run_compression(step=step)
+        if cfg.compression is not None:
+            print(f"Compress ckpt saved at step {step}")
+            runner.run_compression(step=step)
 
     else:
         runner.train()
