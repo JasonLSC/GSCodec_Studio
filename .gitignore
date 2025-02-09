@@ -138,6 +138,7 @@ temp
 !examples/benchmarks/compression/results/
 .github/
 
+<<<<<<< HEAD
 setup_gscodec.py
 *.ipynb
 Readme_GSCodec.md 
@@ -146,6 +147,9 @@ temp
 stats
 figs
 
+=======
+gsc_utils
+>>>>>>> dev_compression_simulation
 examples/benchmarks/compression/mpeg_exp
 examples/benchmarks/compression/rebuttal
 examples/benchmarks/viewer

@@ -1,6 +1,7 @@
 import json
 import os
 from dataclasses import dataclass
+import shutil
 from typing import Any, Callable, Dict
 
 import numpy as np
@@ -15,9 +16,9 @@ from gsplat.utils import inverse_log_transform, log_transform
 
 
 @dataclass
-class PngCompression:
-    """Uses quantization and sorting to compress splats into PNG files and uses
-    K-means clustering to compress the spherical harmonic coefficents.
+class HevcCompression:
+    """Uses quantization and sorting to compress splats into mp4 files via libx265
+      and uses K-means clustering to compress the spherical harmonic coefficents.
 
     .. warning::
         This class requires the `imageio <https://pypi.org/project/imageio/>`_,
@@ -45,14 +46,15 @@ class PngCompression:
 
     use_sort: bool = True
     verbose: bool = True
+    qp: int = 10
 
     def _get_compress_fn(self, param_name: str) -> Callable:
         compress_fn_map = {
             "means": _compress_png_16bit,
-            "scales": _compress_png_kbit,
-            "quats": _compress_png_kbit,
-            "opacities": _compress_png,
-            "sh0": _compress_png_kbit,
+            "scales": _compress_hevc_kbit,
+            "quats": _compress_quats_hevc_kbit,
+            "opacities": _compress_hevc_kbit,
+            "sh0": _compress_hevc_kbit,
             # "shN": _compress_kmeans,
             "shN": _compress_masked_kmeans,
         }
@@ -64,10 +66,10 @@ class PngCompression:
     def _get_decompress_fn(self, param_name: str) -> Callable:
         decompress_fn_map = {
             "means": _decompress_png_16bit,
-            "scales": _decompress_png_kbit,
-            "quats": _decompress_png_kbit,
-            "opacities": _decompress_png,
-            "sh0": _decompress_png_kbit,
+            "scales": _decompress_hevc_kbit,
+            "quats": _decompress_quats_hevc_kbit,
+            "opacities": _decompress_hevc_kbit,
+            "sh0": _decompress_hevc_kbit,
             # "shN": _decompress_kmeans,
             "shN": _decompress_masked_kmeans,
         }
@@ -84,7 +86,7 @@ class PngCompression:
             splats (Dict[str, Tensor]): Gaussian splats to compress
         """
         if entropy_models is not None:
-            raise ValueError("PngCompression should not require entropy_models")
+            raise ValueError("HevcCompression should not require entropy_models")
         
         # Oulier filtering
         outlier_filtering = True
@@ -115,6 +117,7 @@ class PngCompression:
             kwargs = {
                 "n_sidelen": n_sidelen,
                 "verbose": self.verbose,
+                "qp": self.qp
             }
             meta[param_name] = compress_fn(
                 compress_dir, param_name, splats[param_name], **kwargs
@@ -224,10 +227,11 @@ def _decompress_png(compress_dir: str, param_name: str, meta: Dict[str, Any]) ->
     params = params.to(dtype=getattr(torch, meta["dtype"]))
     return params
 
-def _compress_png_kbit(
-    compress_dir: str, param_name: str, params: Tensor, n_sidelen: int, quantization: int = 8, **kwargs
+def _compress_hevc_kbit(
+    compress_dir: str, param_name: str, params: Tensor, n_sidelen: int, 
+    quantization: int = 8, qp: int = 10, **kwargs
 ) -> Dict[str, Any]:
-    """Compress parameters with k-bit quantization and lossless PNG compression.
+    """Compress scales parameters with k-bit quantization and HEVC compression.
 
     Args:
         compress_dir (str): compression directory
@@ -256,7 +260,24 @@ def _compress_png_kbit(
     img = (img_norm * (2**quantization - 1)).round().astype(np.uint8)
     img = img << (8 - quantization)
     img = img.squeeze()
+
+    # save for check
+    np.save(os.path.join(compress_dir, f"{param_name}.npy"), img)
+
+    png_file = os.path.join(compress_dir, f"{param_name}.png")
     imageio.imwrite(os.path.join(compress_dir, f"{param_name}.png"), img)
+
+    # run ffmpeg libx265 to compress PNG file
+    mp4_file = os.path.join(compress_dir, f"{param_name}.mp4")
+    # if param_name == "sh0":
+    #     qp += 2
+    print(f"QP value of {param_name} is: {qp}")
+    if param_name == "opacities":
+        cmd = f"ffmpeg -i {png_file} -c:v libx265 -pix_fmt gray -x265-params \"qp={qp}\" {mp4_file}"
+    else:
+        cmd = f"ffmpeg -i {png_file} -c:v libx265 -x265-params \"qp={qp}\" {mp4_file}"
+    os.system(cmd)
+    os.remove(png_file)
 
     meta = {
         "shape": list(params.shape),
@@ -268,8 +289,8 @@ def _compress_png_kbit(
     return meta
 
 
-def _decompress_png_kbit(compress_dir: str, param_name: str, meta: Dict[str, Any]) -> Tensor:
-    """Decompress parameters from PNG file.
+def _decompress_hevc_kbit(compress_dir: str, param_name: str, meta: Dict[str, Any]) -> Tensor:
+    """Decompress parameters from mp4 file.
 
     Args:
         compress_dir (str): compression directory
@@ -285,7 +306,21 @@ def _decompress_png_kbit(compress_dir: str, param_name: str, meta: Dict[str, Any
         params = torch.zeros(meta["shape"], dtype=getattr(torch, meta["dtype"]))
         return meta
 
-    img = imageio.imread(os.path.join(compress_dir, f"{param_name}.png"))
+    reader = imageio.get_reader(os.path.join(compress_dir, f"{param_name}.mp4"), format='FFMPEG')
+    img = reader.get_data(0)
+    reader.close()
+
+    if param_name == "opacities":
+        img = img[...,0]
+        # import pdb; pdb.set_trace()
+
+    # debug for check
+    raw_img = np.load(os.path.join(compress_dir, f"{param_name}.npy"))
+    cal_psnr = lambda x, y: float('inf') if (d := np.mean((x-y)**2)) == 0 else 20*np.log10(255) - 10*np.log10(d)
+    print(f"PSNR of \"{param_name}\" map after video coding: {cal_psnr(raw_img, img)} dB")
+    os.remove(os.path.join(compress_dir, f"{param_name}.npy"))
+    # ---------------
+
     img = img >> (8 - meta["quantization"])
     img_norm = img / (2**meta["quantization"] - 1)
 
@@ -298,6 +333,121 @@ def _decompress_png_kbit(compress_dir: str, param_name: str, meta: Dict[str, Any
     params = params.to(dtype=getattr(torch, meta["dtype"]))
     return params
 
+
+def _compress_quats_hevc_kbit(
+    compress_dir: str, param_name: str, params: Tensor, n_sidelen: int, 
+    quantization: int = 8, qp: int = 10, **kwargs
+) -> Dict[str, Any]:
+    """Compress scales parameters with k-bit quantization and HEVC compression.
+
+    Args:
+        compress_dir (str): compression directory
+        param_name (str): parameter field name
+        params (Tensor): parameters
+        n_sidelen (int): image side length
+
+    Returns:
+        Dict[str, Any]: metadata
+    """
+    import imageio.v2 as imageio
+
+    if torch.numel == 0:
+        meta = {
+            "shape": list(params.shape),
+            "dtype": str(params.dtype).split(".")[1],
+        }
+        return meta
+
+    grid = params.reshape((n_sidelen, n_sidelen, -1))
+    mins = torch.amin(grid, dim=(0, 1))
+    maxs = torch.amax(grid, dim=(0, 1))
+    grid_norm = (grid - mins) / (maxs - mins)
+    img_norm = grid_norm.detach().cpu().numpy()
+
+    img = (img_norm * (2**quantization - 1)).round().astype(np.uint8)
+    img = img << (8 - quantization)
+    img = img.squeeze()
+
+    # save for check
+    np.save(os.path.join(compress_dir, f"{param_name}.npy"), img)
+
+    # split 4 channels into 3+1 channels
+    png_file_0 = os.path.join(compress_dir, f"{param_name}_u.png")
+    imageio.imwrite(png_file_0, img[...,:3])
+
+    png_file_1 = os.path.join(compress_dir, f"{param_name}_l.png")
+    imageio.imwrite(png_file_1, img[...,3])
+
+    # run ffmpeg libx265 to compress PNG file
+    print(f"QP value of {param_name} is: {qp}")
+
+    mp4_file_0 = os.path.join(compress_dir, f"{param_name}_u.mp4")
+    mp4_file_1 = os.path.join(compress_dir, f"{param_name}_l.mp4")
+    
+    cmd = f"ffmpeg -i {png_file_0} -c:v libx265 -x265-params \"qp={qp}\" {mp4_file_0}"
+    os.system(cmd)
+    os.remove(png_file_0)
+
+    cmd = f"ffmpeg -i {png_file_1} -c:v libx265 -pix_fmt gray -x265-params \"qp={qp}\" {mp4_file_1}"
+    os.system(cmd)
+    os.remove(png_file_1)
+
+    meta = {
+        "shape": list(params.shape),
+        "dtype": str(params.dtype).split(".")[1],
+        "mins": mins.tolist(),
+        "maxs": maxs.tolist(),
+        "quantization": quantization, 
+    }
+    return meta
+
+
+def _decompress_quats_hevc_kbit(compress_dir: str, param_name: str, meta: Dict[str, Any]) -> Tensor:
+    """Decompress parameters from mp4 file.
+
+    Args:
+        compress_dir (str): compression directory
+        param_name (str): parameter field name
+        meta (Dict[str, Any]): metadata
+
+    Returns:
+        Tensor: parameters
+    """
+    import imageio.v2 as imageio
+
+    if not np.all(meta["shape"]):
+        params = torch.zeros(meta["shape"], dtype=getattr(torch, meta["dtype"]))
+        return meta
+
+    reader = imageio.get_reader(os.path.join(compress_dir, f"{param_name}_u.mp4"), format='FFMPEG')
+    img_0 = reader.get_data(0)
+    reader.close()
+
+    reader = imageio.get_reader(os.path.join(compress_dir, f"{param_name}_l.mp4"), format='FFMPEG')
+    img_1 = reader.get_data(0)
+    img_1 = img_1[...,0:1]
+    reader.close()
+
+    img = np.concatenate([img_0, img_1], axis=-1)
+
+    # debug for check
+    raw_img = np.load(os.path.join(compress_dir, f"{param_name}.npy"))
+    cal_psnr = lambda x, y: float('inf') if (d := np.mean((x-y)**2)) == 0 else 20*np.log10(255) - 10*np.log10(d)
+    print(f"PSNR of \"{param_name}\" map after video coding: {cal_psnr(raw_img, img)} dB")
+    os.remove(os.path.join(compress_dir, f"{param_name}.npy"))
+    # ---------------
+
+    img = img >> (8 - meta["quantization"])
+    img_norm = img / (2**meta["quantization"] - 1)
+
+    grid_norm = torch.tensor(img_norm)
+    mins = torch.tensor(meta["mins"])
+    maxs = torch.tensor(meta["maxs"])
+    grid = grid_norm * (maxs - mins) + mins
+
+    params = grid.reshape(meta["shape"])
+    params = params.to(dtype=getattr(torch, meta["dtype"]))
+    return params
 
 def _compress_png_16bit(
     compress_dir: str, param_name: str, params: Tensor, n_sidelen: int, **kwargs
@@ -512,7 +662,7 @@ def _compress_masked_kmeans(
     compress_dir: str,
     param_name: str,
     params: Tensor,
-    n_clusters: int = 32768, # 65536
+    n_clusters: int = 4096, # 65536
     quantization: int = 8,
     verbose: bool = True,
     **kwargs,

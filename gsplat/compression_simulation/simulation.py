@@ -23,6 +23,7 @@ class CompressionSimulation:
                  device: device = None, 
                  ada_mask_opt: bool = False,
                  ada_mask_step: int = 10_000,
+                 ada_mask_strategy: Optional[str] = "learnable",
                  **kwargs) -> None:
         self.entropy_model_enable = entropy_model_enable
         self.entropy_model_type = entropy_model_type
@@ -41,6 +42,7 @@ class CompressionSimulation:
         self.shN_qat = False
         self.shN_ada_mask_opt = ada_mask_opt
         self.shN_ada_mask_step = ada_mask_step
+        self.shN_ada_mask_strategy = ada_mask_strategy
 
         self.q_bitwidth = {
             "means": None,
@@ -137,9 +139,11 @@ class CompressionSimulation:
             # get scheduler
             self.entropy_model_schedulers = {}
             for k, v in self.entropy_models.items():
-                if isinstance(v, Entropy_factorized) or isinstance(v, Entropy_factorized_optimized) or isinstance(v, Entropy_factorized_optimized_refactor):
-                    # TODO: scheduler for factorized
-                    pass
+                if isinstance(v, Entropy_factorized) or \
+                    isinstance(v, Entropy_factorized_optimized) or \
+                    isinstance(v, Entropy_factorized_optimized_refactor):
+                        # TODO: scheduler for factorized
+                        pass
                 elif isinstance(v, Entropy_gaussian):
                     v_sch = torch.optim.lr_scheduler.ExponentialLR(
                         self.entropy_model_optimizers[k], gamma=0.01 ** (1.0 / (30000 - entropy_steps[k]))
@@ -151,15 +155,23 @@ class CompressionSimulation:
 
         # init. for adaptive mask
         if self.shN_ada_mask_opt:
-            from .ada_mask import AnnealingMask
-            cap_max = kwargs.get("cap_max", 1_000_000)
-            self.shN_ada_mask = AnnealingMask(input_shape=[cap_max, 1, 1], 
-                                              device=device,
-                                              annealing_start_iter=ada_mask_step)
-            
-            self.shN_ada_mask_optimizer = torch.optim.Adam([
-                {'params': self.shN_ada_mask.parameters(), 'lr': 0.01}
-            ])
+            if self.shN_ada_mask_strategy == "learnable":
+                from .ada_mask import AnnealingMask
+                cap_max = kwargs.get("cap_max", 1_000_000)
+                self.shN_ada_mask = AnnealingMask(input_shape=[cap_max, 1, 1], 
+                                                device=device,
+                                                annealing_start_iter=ada_mask_step)
+                
+                self.shN_ada_mask_optimizer = torch.optim.Adam([
+                    {'params': self.shN_ada_mask.parameters(), 'lr': 0.01}
+                ])
+            elif self.shN_ada_mask_strategy == "gradient":
+                pass
+            elif self.shN_ada_mask_strategy is None:
+                raise ValueError("\'shN_ada_mask_strategy\' should not be None")
+            else:
+                raise NotImplementedError(f"\'shN_ada_mask_strategy\': {self.shN_ada_mask_strategy} has not been implemented.")
+
 
     def _get_simulate_fn(self, param_name: str) -> Callable:
         simulate_fn_map = {
@@ -174,21 +186,10 @@ class CompressionSimulation:
             return simulate_fn_map[param_name]
         else:
             return torch.nn.Identity()
-    
-    # # 使用四分位距(IQR)来确定合理的边界
-    # def _estiblish_bbox(self, pos: Tensor, k: float=1.5):
-    #     # 计算每个维度的四分位数
-    #     q1, q3 = torch.quantile(pos, torch.tensor([0.25, 0.75], device=pos.device), dim=0)
-    #     iqr = q3 - q1
-        
-    #     # 计算边界
-    #     self.bbox_lower_bound = q1 - k * iqr
-    #     self.bbox_upper_bound = q3 + k * iqr
 
     def _estiblish_bbox(self, pos: Tensor, k: float=1.5):
         # 计算每个维度的四分位数
         self.bbox_lower_bound, self.bbox_upper_bound = torch.quantile(pos, torch.tensor([0.01, 0.99], device=pos.device), dim=0)
-
 
     def _get_pts_inside_bbox(self, pos: Tensor) -> Tensor:
         """
@@ -322,11 +323,35 @@ class CompressionSimulation:
     
 
     def simulate_compression_shN(self, param: torch.nn.Parameter, step: int, choose_idx: torch.Tensor, pos: torch.Tensor=None) -> Tensor:
-        if self.shN_ada_mask_opt and step > self.shN_ada_mask_step:
+        if self.shN_ada_mask_opt and self.shN_ada_mask_strategy == "learnable" and step > self.shN_ada_mask_step:
             param = self.shN_ada_mask(param, step)
-            return param, None
+            # return param, None
 
         return param, None
+    
+
+    def shN_gradient_threshold(self, param: torch.nn.Parameter, step: int) -> None:
+        param_value = param.data
+        
+        # Check which splat's shN are all zero
+        zero_mask = (param_value == 0).all(dim=-1).all(dim=-1)
+
+        # Calculate proportion of splats with non-zero shN
+        non_zero_mask_ratio = 1 - zero_mask.sum()/zero_mask.size(0)
+        # print(f"Vaild shN ratio: {non_zero_mask_ratio*100:.3f}%")
+
+        # Dynamically set threshold based on non-zero ratio,
+        gradient_threshold = 2e-3 if non_zero_mask_ratio < 0.10 else 100 # 100, relatively equals to inf
+
+        # Identify gradients below threshold
+        low_gradient_mask = torch.norm(param.grad, p=2, dim=(-2,-1)) < gradient_threshold 
+        # if step >= 1000:
+        #     import pdb; pdb.set_trace()
+
+        # Zero out gradients where both conditions are met
+        final_mask = torch.logical_and(zero_mask, low_gradient_mask)
+        # final_mask = low_gradient_mask
+        param.grad[final_mask] = 0
 
 
 # STE families

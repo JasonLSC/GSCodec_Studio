@@ -2,6 +2,7 @@ import json
 import math
 import os
 import time
+import shutil
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from collections import defaultdict
@@ -40,7 +41,7 @@ from lib_bilagrid import (
     total_variation_loss,
 )
 
-from gsplat.compression import PngCompression
+from gsplat.compression import PngCompression, HevcCompression
 from gsplat.distributed import cli
 from gsplat.rendering import rasterization
 from gsplat.strategy import DefaultStrategy, MCMCStrategy
@@ -96,7 +97,9 @@ class Config:
     # Path to the .pt files. If provide, it will skip training and run evaluation only.
     ckpt: Optional[List[str]] = None
     # Name of compression strategy to use
-    compression: Optional[Literal["png", "entropy_coding"]] = None
+    compression: Optional[Literal["png", "entropy_coding", "hevc"]] = None
+    # Quantization parameters when set to hevc
+    qp: Optional[int] = None
 
     # Enable profiler
     profiler_enabled: bool = False
@@ -132,6 +135,8 @@ class Config:
     shN_ada_mask_opt: bool = False
     # Steps to enable shN adaptive mask
     ada_mask_steps: int = 10_000
+    # Strategy to obtain adaptive mask
+    shN_ada_mask_strategy: Optional[str] = "learnable" # "gradient"
     
     # Render trajectory path
     render_traj_path: str = "interp"
@@ -351,6 +356,38 @@ def create_splats_with_optimizers(
     }
     return splats, optimizers
 
+def save_ply(splats: torch.nn.ParameterDict, path: str):
+    from plyfile import PlyData, PlyElement
+
+    means = splats["means"].detach().cpu().numpy()
+    normals = np.zeros_like(means)
+    sh0 = splats["sh0"].detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+    shN = splats["shN"].detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+    opacities = splats["opacities"].detach().unsqueeze(1).cpu().numpy()
+    scales = splats["scales"].detach().cpu().numpy()
+    quats = splats["quats"].detach().cpu().numpy()
+
+    def construct_list_of_attributes(splats):
+        l = ['x', 'y', 'z', 'nx', 'ny', 'nz']
+
+        for i in range(splats["sh0"].shape[1]*splats["sh0"].shape[2]):
+            l.append('f_dc_{}'.format(i))
+        for i in range(splats["shN"].shape[1]*splats["shN"].shape[2]):
+            l.append('f_rest_{}'.format(i))
+        l.append('opacity')
+        for i in range(splats["scales"].shape[1]):
+            l.append('scale_{}'.format(i))
+        for i in range(splats["quats"].shape[1]):
+            l.append('rot_{}'.format(i))
+        return l
+
+    dtype_full = [(attribute, 'f4') for attribute in construct_list_of_attributes(splats)]
+
+    elements = np.empty(means.shape[0], dtype=dtype_full)
+    attributes = np.concatenate((means, normals, sh0, shN, opacities, scales, quats), axis=1)
+    elements[:] = list(map(tuple, attributes))
+    el = PlyElement.describe(elements, 'vertex')
+    PlyData([el]).write(path)
 
 class Runner:
     """Engine for training and testing."""
@@ -437,11 +474,12 @@ class Runner:
                 self.compression_method = PngCompression()
             elif  cfg.compression == "entropy_coding":
                 self.compression_method = EntropyCodingCompression()
+            elif cfg.compression == "hevc":
+                self.compression_method = HevcCompression(qp=cfg.qp)
             else:
                 raise ValueError(f"Unknown compression strategy: {cfg.compression}")
         
         if cfg.compression_sim:
-            # TODO: bad impl. 
             cap_max = cfg.strategy.cap_max if cfg.strategy.cap_max is not None else None
             self.compression_sim_method = CompressionSimulation(cfg.entropy_model_opt, 
                                                     cfg.entropy_model_type,
@@ -449,7 +487,11 @@ class Runner:
                                                     self.device, 
                                                     cfg.shN_ada_mask_opt,
                                                     cfg.ada_mask_steps,
+                                                    cfg.shN_ada_mask_strategy,
                                                     cap_max=cap_max,)
+            # if cfg.shN_ada_mask_opt and cfg.shN_ada_mask_strategy == "gradient":
+            #     self.compression_sim_method.register_shN_gradient_threshold_hook(self.splats["shN"])
+
             if cfg.entropy_model_opt:
                 selected_key = min((k for k, v in cfg.entropy_steps.items() if v > 0), key=lambda k: cfg.entropy_steps[k])
                 self.entropy_min_step = cfg.entropy_steps[selected_key]
@@ -826,7 +868,7 @@ class Runner:
                     )
                 
                 if cfg.compression_sim:
-                    if self.compression_sim_method.shN_ada_mask_opt and step > cfg.ada_mask_steps:
+                    if self.compression_sim_method.shN_ada_mask_opt and cfg.shN_ada_mask_strategy == "learnable" and step > cfg.ada_mask_steps:
                         loss = loss + self.compression_sim_method.shN_ada_mask.get_sparsity_loss()
                 
                 # tmp workaround
@@ -841,15 +883,6 @@ class Runner:
                     pose_err = F.l1_loss(camtoworlds_gt, camtoworlds)
                     desc += f"pose err={pose_err.item():.6f}| "
                 pbar.set_description(desc)
-
-                # write images (gt and render)
-                # if world_rank == 0 and step % 800 == 0:
-                #     canvas = torch.cat([pixels, colors], dim=2).detach().cpu().numpy()
-                #     canvas = canvas.reshape(-1, *canvas.shape[2:])
-                #     imageio.imwrite(
-                #         f"{self.render_dir}/train_rank{self.world_rank}.png",
-                #         (canvas * 255).astype(np.uint8),
-                #     )
 
                 # tensorboard monitor
                 if world_rank == 0 and cfg.tb_every > 0 and step % cfg.tb_every == 0:
@@ -875,8 +908,11 @@ class Runner:
                             self.writer.add_histogram("train_hist/sh0", self.splats["sh0"], step)
                             if total_esti_bits > 0:
                                 self.writer.add_scalar("train/bpp_loss", total_esti_bits.item(), step)
-                        if self.compression_sim_method.shN_ada_mask_opt and step > cfg.ada_mask_steps:
-                            self.writer.add_scalar("train/ada_mask", self.compression_sim_method.shN_ada_mask.get_mask_ratio(), step)
+                        if self.compression_sim_method.shN_ada_mask_opt and cfg.shN_ada_mask_strategy == "learnable" and step > cfg.ada_mask_steps:
+                            self.writer.add_scalar("train/ada_mask_ratio", self.compression_sim_method.shN_ada_mask.get_mask_ratio(), step)
+                        if self.compression_sim_method.shN_ada_mask_opt and cfg.shN_ada_mask_strategy == "gradient":
+                            mask_ratio = (self.splats["shN"] == 0).all(dim=-1).all(dim=-1).sum() / self.splats["shN"].size(0)
+                            self.writer.add_scalar("train/ada_mask_ratio", mask_ratio, step)
                         
                     self.writer.add_histogram("train_hist/means", self.splats["means"], step)
                     self.writer.flush()
@@ -896,10 +932,13 @@ class Runner:
                     ) as f:
                         json.dump(stats, f)
                     
-                    if cfg.shN_ada_mask_opt and step > cfg.ada_mask_steps:
+                    if cfg.shN_ada_mask_opt and cfg.shN_ada_mask_strategy == "learnable" and step > cfg.ada_mask_steps:
                         shN_ada_mask = self.compression_sim_method.shN_ada_mask.get_binary_mask()
                         self.splats["shN"].data = self.splats["shN"].data * shN_ada_mask
-                        
+                    if cfg.shN_ada_mask_opt and cfg.shN_ada_mask_strategy == "gradient":
+                        shN_ada_mask = (self.splats["shN"].data != 0).any(dim=-1).any(dim=-1)
+                    
+                    # prepare data to be saved
                     data = {"step": step, "splats": self.splats.state_dict()}
                     if cfg.pose_opt:
                         if world_size > 1:
@@ -924,6 +963,10 @@ class Runner:
                         data, f"{self.ckpt_dir}/ckpt_{step}_rank{self.world_rank}.pt"
                     )
 
+                # Operations for modifying the gradient (given threshold) for adaptive shN masking
+                if cfg.shN_ada_mask_opt and cfg.shN_ada_mask_strategy == "gradient":
+                    self.compression_sim_method.shN_gradient_threshold(self.splats["shN"], step)
+                
                 # Turn Gradients into Sparse Tensor before running optimizer
                 if cfg.sparse_grad:
                     assert cfg.packed, "Sparse gradients only work with packed mode."
@@ -939,37 +982,23 @@ class Runner:
                             is_coalesced=len(Ks) == 1,
                         )
 
-            if cfg.visible_adam:
-                gaussian_cnt = self.splats.means.shape[0]
-                if cfg.packed:
-                    visibility_mask = torch.zeros_like(
-                        self.splats["opacities"], dtype=bool
-                    )
-                    visibility_mask.scatter_(0, info["gaussian_ids"], 1)
-                else:
-                    visibility_mask = (info["radii"] > 0).any(0)
-
-            # optimize
-            for optimizer in self.optimizers.values():
+                # logic for 'visible_adam'
                 if cfg.visible_adam:
-                    optimizer.step(visibility_mask)
-                else:
-                    optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-            for optimizer in self.pose_optimizers:
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-            for optimizer in self.app_optimizers:
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-            for optimizer in self.bil_grid_optimizers:
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-            for scheduler in schedulers:
-                scheduler.step()
+                    gaussian_cnt = self.splats.means.shape[0]
+                    if cfg.packed:
+                        visibility_mask = torch.zeros_like(
+                            self.splats["opacities"], dtype=bool
+                        )
+                        visibility_mask.scatter_(0, info["gaussian_ids"], 1)
+                    else:
+                        visibility_mask = (info["radii"] > 0).any(0)
+
                 # optimize
                 for optimizer in self.optimizers.values():
-                    optimizer.step()
+                    if cfg.visible_adam:
+                        optimizer.step(visibility_mask)
+                    else:
+                        optimizer.step()
                     optimizer.zero_grad(set_to_none=True)
                 for optimizer in self.pose_optimizers:
                     optimizer.step()
@@ -993,7 +1022,7 @@ class Runner:
                             if scheduler is not None and step > cfg.entropy_steps[name]:
                                 scheduler.step()
                     # (optional) shN adaptive mask optimize
-                    if self.compression_sim_method.shN_ada_mask_opt and step > cfg.ada_mask_steps:
+                    if self.compression_sim_method.shN_ada_mask_opt and cfg.shN_ada_mask_strategy == "learnable" and step > cfg.ada_mask_steps:
                         self.compression_sim_method.shN_ada_mask_optimizer.step()
                         self.compression_sim_method.shN_ada_mask_optimizer.zero_grad(set_to_none=True)
 
@@ -1018,7 +1047,7 @@ class Runner:
                     )
                 else:
                     assert_never(self.cfg.strategy)
-                
+
                 self.step_profiler()
 
                 # eval the full set
@@ -1206,14 +1235,19 @@ class Runner:
         world_rank = self.world_rank
 
         compress_dir = f"{cfg.result_dir}/compression/rank{world_rank}"
-        os.makedirs(compress_dir, exist_ok=True)
-        # import pdb; pdb.set_trace()
+
+        if os.path.exists(compress_dir):
+            shutil.rmtree(compress_dir)
+        os.makedirs(compress_dir)
+
         self.run_param_distribution_vis(self.splats, save_dir=f"{cfg.result_dir}/visualization/raw")
         
         if isinstance(self.compression_method, PngCompression):
             self.compression_method.compress(compress_dir, self.splats)
         elif isinstance(self.compression_method, EntropyCodingCompression):
             self.compression_method.compress(compress_dir, self.splats, self.entropy_models)
+        elif isinstance(self.compression_method, HevcCompression):
+            self.compression_method.compress(compress_dir, self.splats)
         else:
             raise NotImplementedError(f"The compression method is not implemented yet.")
 
@@ -1267,7 +1301,12 @@ class Runner:
                 num_ch = ckpt["splats"][attr_name].shape[-1]
                 if entropy_model_type == "factorized_model":
                     # TODO
-                    pass
+                    if attr_name == "scales" or attr_name == "sh0":
+                        filters = (3, 3)
+                    else:
+                        filters = (3, 3, 3)
+                    entropy_model = Entropy_factorized_optimized_refactor(channel=num_ch, filters=filters)
+
                 elif entropy_model_type == "gaussian_model":
                     entropy_model = Entropy_gaussian(channel=num_ch)
                 
@@ -1294,6 +1333,17 @@ class Runner:
             radius_clip=3.0,  # skip GSs that have small image radius (in pixels)
         )  # [1, H, W, 3]
         return render_colors[0].cpu().numpy()
+    
+    @torch.no_grad()
+    def save_params_into_ply_file(
+        self
+    ):
+        """Save parameters of Gaussian Splats into .ply file"""
+        ply_dir = f"{cfg.result_dir}/ply"
+        os.makedirs(ply_dir, exist_ok=True)
+        ply_file = ply_dir + "/splats.ply"
+        save_ply(self.splats, ply_file)
+        print(f"Saved parameters of splats into file: {ply_file}.")
 
 
 def main(local_rank: int, world_rank, world_size: int, cfg: Config):
@@ -1313,8 +1363,9 @@ def main(local_rank: int, world_rank, world_size: int, cfg: Config):
         for k in runner.splats.keys():
             runner.splats[k].data = torch.cat([ckpt["splats"][k] for ckpt in ckpts])
         step = ckpts[0]["step"]
-        runner.eval(step=step)
-        runner.render_traj(step=step)
+        # runner.save_params_into_ply_file()
+        # runner.eval(step=step)
+        # runner.render_traj(step=step)
         if cfg.compression is not None:
             if cfg.compression == "entropy_coding":
                 runner.load_entropy_model_from_ckpt(ckpts[0], cfg.entropy_model_type)

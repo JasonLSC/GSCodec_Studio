@@ -153,8 +153,11 @@ class Entropy_factorized_optimized(nn.Module):
 
     def forward(self, x, Q=None, **kwargs):
         # x: [N, C], quantized
+        import pdb; pdb.set_trace()
         if Q is None:
             Q = self.Q
+        elif isinstance(Q, torch.Tensor):
+            pass
         else:
             Q = torch.tensor([Q], device=x.device)
 
@@ -200,6 +203,9 @@ class Entropy_factorized_optimized_refactor(Entropy_factorized_optimized):
         # x: [N, C], quantized
         if Q is None:
             Q = self.Q
+        elif isinstance(Q, torch.Tensor):
+            if Q.size()[0] != 1:
+                Q = Q.unsqueeze(-1).unsqueeze(-1)
         else:
             Q = torch.tensor([Q], device=x.device)
 
@@ -248,6 +254,62 @@ class Entropy_factorized_optimized_refactor(Entropy_factorized_optimized):
         
         bits = -torch.log2(likelihood)
         return bits.permute(2, 1, 0).squeeze(1)
+    
+    def get_likelihood(self, x, Q=None, **kwargs):
+        # x: [N, C], quantized
+        if Q is None:
+            Q = self.Q
+        elif isinstance(Q, torch.Tensor):
+            if Q.size()[0] != 1:
+                Q = Q.unsqueeze(-1).unsqueeze(-1)
+        else:
+            Q = torch.tensor([Q], device=x.device)
+
+        # [N, C] -> [C, 1, N], batch维度移到最后以提高内存访问效率
+        x = x.t().unsqueeze(1)
+
+        # 预计算公共部分
+        half_Q = 0.5 * Q.detach()
+        x_lower = x - half_Q
+        x_upper = x + half_Q
+        
+        stacked_inputs = torch.cat([x_lower, x_upper], dim=0)  # [2C, 1, N]
+        logits = stacked_inputs
+
+        times = 32
+        
+        zero_to_fill = times - stacked_inputs.shape[-1] % times
+        zero_tensor = torch.zeros([*logits.shape[0:2],zero_to_fill], device=logits.device)
+        logits = torch.concat([logits, zero_tensor], dim=-1)
+
+        C, _, N = logits.shape
+        
+        # reshape
+        logits = logits.view([times*C, 1, N//times])
+        
+        for i in range(len(self.filters) + 1):
+            matrix = nnf.softplus(self._matrices[i])  # [C, filters[i+1], filters[i]]
+            matrix = matrix.repeat(2*times, 1, 1)  # [2*C, filters[i+1], filters[i]]
+            
+            logits = torch.bmm(matrix, logits)  # [2*C, filters[i+1], N]
+            logits = logits + self._bias[i].repeat(2*times, 1, 1) 
+            
+            if i < len(self._factor):
+                factor = nnf.tanh(self._factor[i].repeat(2*times, 1, 1))
+                logits += factor * nnf.tanh(logits)
+        
+        logits = logits.view(C, 1, N)
+
+        logits = logits[..., 0:(N-zero_to_fill)]
+
+        lower, upper = logits[0:self.channel], logits[self.channel:self.channel*2]
+
+        sign = -(lower + upper).sign()
+        likelihood = torch.abs(nnf.sigmoid(sign * upper) - nnf.sigmoid(sign * lower))
+        likelihood = self.likelihood_lower_bound(likelihood)
+
+        return likelihood.permute(2, 1, 0).squeeze(1)
+
 
 from .gaussian_distribution_model import hash_based_estimator
 
