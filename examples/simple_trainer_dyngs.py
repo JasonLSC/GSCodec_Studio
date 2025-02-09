@@ -44,17 +44,12 @@ class ProfilerConfig:
             torch.profiler.ProfilerActivity.CUDA,
         ]
         
-        # 基础配置
-        self.wait = 4900      # 开始记录前等待的步数
-        self.warmup = 50    # 预热步数
-        self.active = 30_000    # 实际分析的步数
-        # self.repeat = 2    # 重复次数
-        # self.skip_first = 10  # 跳过前N步（可选）
+        self.wait = 4900      
+        self.warmup = 50    
+        self.active = 30_000    
         
-        # 创建schedule
         self.schedule = self._create_schedule()
         
-        # 其他profiler设置
         self.on_trace_ready = torch.profiler.tensorboard_trace_handler('./log/profiler')
         self.record_shapes = True
         self.profile_memory = True
@@ -66,12 +61,9 @@ class ProfilerConfig:
             wait=self.wait,
             warmup=self.warmup,
             active=self.active,
-            # repeat=self.repeat,
-            # skip_first=self.skip_first
         )
     
     def update_schedule(self, **kwargs):
-        """动态更新schedule参数"""
         for key, value in kwargs.items():
             if hasattr(self, key):
                 setattr(self, key, value)
@@ -329,9 +321,7 @@ class Runner:
             batch_size=1,
             shuffle=True,
             num_workers=16,
-            # persistent_workers=True,
             pin_memory=True,
-            # collate_fn=collate_fn
         )
 
         self.testloader = torch.utils.data.DataLoader(
@@ -339,9 +329,7 @@ class Runner:
             batch_size=1,
             shuffle=False,
             num_workers=8,
-            # persistent_workers=True,
             pin_memory=True,
-            # collate_fn=collate_fn
         )
         # scene scale
         self.scene_scale = self.parser.scene_scale * 1.1 * cfg.global_scale
@@ -405,7 +393,6 @@ class Runner:
         self.strategy_state = self.strategy.initialize_state(scene_scale=self.scene_scale)
         
         # Compression Strategy
-        # TODO Compression Strategy should proceed here, according to GSplat
         self.compression_method = None
         if cfg.compression is not None:
             if cfg.compression == "png":
@@ -416,8 +403,6 @@ class Runner:
                 raise ValueError(f"Unknown compression strategy: {cfg.compression}")
 
         if cfg.compression_sim:
-            # TODO: bad impl. 
-            # cap_max = cfg.strategy.cap_max if cfg.strategy.cap_max is not None else None
             self.compression_sim_method = STGCompressionSimulation(cfg.quantization_sim_type,
                                                     cfg.entropy_model_opt, 
                                                     cfg.entropy_steps, 
@@ -789,8 +774,6 @@ class Runner:
                             optimizer.zero_grad(set_to_none=True)
                 
                 self.step_profiler()
-
-                # torch.cuda.empty_cache()
                     
                 # eval the full set
                 if step in [i - 1 for i in cfg.eval_steps]:
