@@ -145,3 +145,7 @@ third_party
 temp
 stats
 figs
+
+examples/benchmarks/compression/mpeg_exp
+examples/benchmarks/compression/rebuttal
+examples/benchmarks/viewer
