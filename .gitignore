@@ -136,3 +136,6 @@ Readme_GSCodec.md
 
 !examples/benchmarks/compression/results/
 gsc_utils
+
+examples/benchmarks/compression
+examples/benchmarks/viewer

@@ -801,7 +801,7 @@ def readColmapSceneInfo(path, images, eval, llffhold=8, multiview=False, duratio
             for testname in uniquecheck:
                 assert testname not in sanitycheck
 
-        else: # INVR mode
+        else: # GSC mode
             selected_test_frame_id = np.zeros(len(cam_infos), dtype=bool)
             for vid in test_view_id:
                 selected_test_frame_id[vid*duration: (vid+1)*duration] = True

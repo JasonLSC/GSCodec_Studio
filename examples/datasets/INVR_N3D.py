@@ -58,8 +58,8 @@ class Parser:
         # Get scene info
         if loader == "colmap": # colmapvalid only for testing
             scene_info = sceneLoadTypeCallbacks["Colmap"](self.source_path, self.images_phrase, self.eval, multiview, duration=self.duration, test_view_id=self.test_view_id, downscale_factor=downscale_factor) # SceneInfo() - NamedTuple
-        elif loader == "invr":
-            scene_info = sceneLoadTypeCallbacks["INVR"](self.source_path, self.images_phrase, self.eval, multiview, duration=self.duration) # SceneInfo() - NamedTuple
+        # elif loader == "invr":
+        #     scene_info = sceneLoadTypeCallbacks["INVR"](self.source_path, self.images_phrase, self.eval, multiview, duration=self.duration) # SceneInfo() - NamedTuple
         else:
             assert False, "Could not recognize scene type!"
 
