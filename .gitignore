@@ -146,3 +146,6 @@ gsc_utils
 examples/benchmarks/compression/mpeg_exp
 examples/benchmarks/compression/rebuttal
 examples/benchmarks/viewer
+
+examples/readme_on_STG.md
+examples/benchmarks/stg/old
