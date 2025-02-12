@@ -1,1 +1,1 @@
-from .simulation import CompressionSimulation
+from .simulation import CompressionSimulation, STGCompressionSimulation

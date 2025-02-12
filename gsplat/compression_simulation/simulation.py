@@ -1,9 +1,6 @@
 from dataclasses import dataclass
-from hmac import new
-from turtle import pos
 from typing import Dict, Optional, Tuple, Union, Callable, Literal
 
-from sympy import Union, true
 import torch
 import torch.nn.functional as F
 from torch import Tensor, device
@@ -30,7 +27,6 @@ class CompressionSimulation:
         self.entropy_steps = entropy_steps
         self.device = device
 
-        # TODO: 明确写一个函数，根据splats里有哪些元素，以及配置文件中让哪些元素参与simulation
         self.simulation_option = {
             "means": False,
             "scales": True,
@@ -62,7 +58,6 @@ class CompressionSimulation:
             "shN": None
         }
 
-        # default settings
         self.entropy_model_option = {
             "means": False,
             "scales": True,
@@ -188,7 +183,6 @@ class CompressionSimulation:
             return torch.nn.Identity()
 
     def _estiblish_bbox(self, pos: Tensor, k: float=1.5):
-        # 计算每个维度的四分位数
         self.bbox_lower_bound, self.bbox_upper_bound = torch.quantile(pos, torch.tensor([0.01, 0.99], device=pos.device), dim=0)
 
     def _get_pts_inside_bbox(self, pos: Tensor) -> Tensor:
@@ -202,7 +196,7 @@ class CompressionSimulation:
     
     def _random_sample_pts(self, mask: Tensor, ratio: float = 0.05) -> Tensor:
         random_values = torch.rand_like(mask.float())
-        random_values[~mask] = 0  # 将invalid位置的概率设为0
+        random_values[~mask] = 0 
 
         # 选择前ratio%的点
         threshold = torch.quantile(random_values[mask], 1 - ratio)

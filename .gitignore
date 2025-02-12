@@ -77,7 +77,6 @@ target/
 
 # Jupyter Notebook
 .ipynb_checkpoints
-.ipynb
 *.ipynb
 
 # pyenv
@@ -127,9 +126,6 @@ data
 results
 
 third_party
-# gscodec
-setup_gscodec.py
-Readme_GSCodec.md
 
 figs
 stats

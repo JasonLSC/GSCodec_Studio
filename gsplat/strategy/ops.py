@@ -64,8 +64,14 @@ def _update_param_with_optimizer(
         names: A list of key names to update. If None, update all. Default: None.
     """
     if names is None:
-        # If names is not provided, update all parameters
-        names = list(params.keys())
+        update_list = []
+        for keys in params.keys():
+            # exclude params related to decoder (MLP), for they don't need to be densified or pruned
+            if "decoder" in keys:
+                continue
+            else:
+                update_list.append(keys)
+        names = list(update_list)
 
     for name in names:
         param = params[name]
@@ -87,6 +93,7 @@ def _update_param_with_optimizer(
                     param_state[key] = optimizer_fn(key, v)
             optimizer.param_groups[i]["params"] = [new_param]
             optimizer.state[new_param] = param_state
+
 
 
 @torch.no_grad()
@@ -150,6 +157,15 @@ def split(
         scales,
         torch.randn(2, len(scales), 3, device=device),
     )  # [2, N, 3]
+
+    # temporal resampling
+    # t_scales = torch.exp(params["trbf_scale"][sel])
+    # t_samples = torch.einsum(
+    #     "ni,bni->bni",
+    #     t_scales,
+    #     torch.randn(2, len(scales), 1, device=device),
+    # ) # [2, N, 1]
+    
 
     def param_fn(name: str, p: Tensor) -> Tensor:
         repeats = [2] + [1] * (p.dim() - 1)
