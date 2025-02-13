@@ -2,6 +2,8 @@
 
 GSCodec Studio is an open-source framework for Gaussian Splats Compression, including static and dynamic splats representation, reconstruction and compression. It is bulit upon an open-source 3D Gaussian Splatting library [gsplat](https://github.com/nerfstudio-project/gsplat), and extended to support 1) dynamic splats representation, 2) training-time compression simulation, 3) more test-time compression strategies.
 
+[Teaser](./assets/Teaser.png)
+
 ## Installation
 
 **Dependence**: Please install [Pytorch](https://pytorch.org/get-started/locally/) first.
@@ -13,7 +15,7 @@ pip install .
 # pip install -e . (develop mode)
 ```
 
-## Evaluation
+## Examples
 
 **Preparations**
 Same as gsplat, we need to install some extra dependencies and download the relevant datasets before the evaluation.
@@ -26,15 +28,23 @@ python datasets/download_dataset.py
 # place other dataset under 'data' folder
 ```
 
-**Static Gaussian Splats Compression**
+We also use third-party library, 'python-fpnge', to accelerate image saving operations during the experiment for now. 
 
-We provide a script that enables more memory-efficient Gaussian splats while maintaining high visual quality, such as representing the Truck scene with only about 8MB of storage. 
+```bash
+cd ../third_party/python-fpnge-master
+pip install .
+```
+
+**Static Gaussian Splats Training and Compression**
+
+We provide a script that enables more memory-efficient Gaussian splats while maintaining high visual quality, such as representing the Truck scene with only about 8MB of storage. The script includes 1) the static splats training with compression simulation, 2) the compression of trained static splats, and 3) the metric evaluation of uncompressed and compressed static splats.
 
 ```bash
 bash benchmarks/compression/final_exp/mcmc_tt_sim.sh
 ```
 
-## More examples
-**Dynamic Gaussian Splats Compression**
+**Dynamic Gaussian Splats Training and Compression**
+(Will be provided on 2/15/2025)
 
 **Extract Per-Frame Static Gaussian from Dynamic Splats**
+(Will be provided on 2/15/2025)

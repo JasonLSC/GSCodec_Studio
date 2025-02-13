@@ -125,8 +125,6 @@ compile_commands.json
 data
 results
 
-third_party
-
 figs
 stats
 temp
@@ -137,7 +135,6 @@ temp
 setup_gscodec.py
 *.ipynb
 Readme_GSCodec.md 
-third_party
 temp
 stats
 figs
