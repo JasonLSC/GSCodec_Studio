@@ -41,11 +41,18 @@ python datasets/download_dataset.py
 ln -s data/tandt /xxxx/Dataset/tandt
 ```
 
-We also use third-party library, 'python-fpnge', to accelerate image saving operations during the experiment for now. 
+We also use third-party library, 'python-fpnge', to accelerate image saving operations during the experiment for now. We also use third-party library, 'gridencoder', to facilitate hash encoding.
 
 ```bash
-cd ../third_party/python-fpnge-master
-pip install .
+cd ..
+pip install third_party/python-fpnge-master
+pip install third_party/gridencoder
+```
+
+Before we start running scripts, we also need to install library for [vector quantization](https://github.com/DeMoriarty/TorchPQ?tab=readme-ov-file#install) and [plas sorting](https://github.com/fraunhoferhhi/PLAS).
+```bash
+# refer to https://github.com/DeMoriarty/TorchPQ?tab=readme-ov-file#install to see how to install TorchPQ
+pip install git+https://github.com/fraunhoferhhi/PLAS.git
 ```
 
 **Static Gaussian Splats Training and Compression**
