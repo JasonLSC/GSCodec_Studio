@@ -5,8 +5,20 @@ GSCodec Studio is an open-source framework for Gaussian Splats Compression, incl
 ![Teaser](./assets/Teaser.png)
 
 ## Installation
+### Repo. & Environment
+```bash
+# Clone the repo.
+git clone https://github.com/JasonLSC/GSCodec_Studio.git --recursive
+cd GSCodec_Studio
 
-**Dependence**: Please install [Pytorch](https://pytorch.org/get-started/locally/) first.
+# Make a conda environment
+conda create --name gscodec_studio python=3.9
+conda activate gscodec_studio
+```
+
+### Packages Installation
+
+Please install [Pytorch](https://pytorch.org/get-started/locally/) first.
 
 Then, you can install the gsplat library extended with more compression features from source code. In this way it will build the CUDA code during installation.
 
