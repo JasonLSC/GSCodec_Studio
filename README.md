@@ -2,7 +2,7 @@
 
 GSCodec Studio is an open-source framework for Gaussian Splats Compression, including static and dynamic splats representation, reconstruction and compression. It is bulit upon an open-source 3D Gaussian Splatting library [gsplat](https://github.com/nerfstudio-project/gsplat), and extended to support 1) dynamic splats representation, 2) training-time compression simulation, 3) more test-time compression strategies.
 
-[Teaser](./assets/Teaser.png)
+![Teaser](./assets/Teaser.png)
 
 ## Installation
 
