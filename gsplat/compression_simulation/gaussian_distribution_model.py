@@ -8,7 +8,7 @@ try:
     import _gridencoder as _backend
 except:
     raise ImportError(
-            "Please install gridencoder with 'pip install gscodec/gridencoder' to use hash encoding"
+            "Please install gridencoder with 'pip install third_party/gridencoder' to use hash encoding"
         )
 
 anchor_round_digits = 16

@@ -13,12 +13,7 @@ from gsplat.compression.outlier_filter import filter_splats
 from gsplat.compression.sort import sort_splats
 from gsplat.utils import inverse_log_transform, log_transform
 
-try:
-    import constriction
-except:
-    raise ImportError(
-        "Please install constriction with 'pip install constriction' to use ANS"
-    )
+
 
 
 @dataclass
@@ -262,6 +257,13 @@ def _get_likelihood(symbols: np.array, bitwidth: int=8) -> np.array:
     pass
 
 def _categorical_ans_encode(symbols: np.array, probabilities: np.array, save_path:str):
+    try:
+        import constriction
+    except:
+        raise ImportError(
+            "Please install constriction with 'pip install constriction' to use ANS"
+    )
+
     num_symbols = symbols.shape[-1]
 
     message_list = []
@@ -364,7 +366,13 @@ def _decompress_factorized_ans(compress_dir: str, param_name: str, meta: Dict[st
     Returns:
         Tensor: parameters
     """
-    import imageio.v2 as imageio
+    try:
+        import constriction
+    except:
+        raise ImportError(
+            "Please install constriction with 'pip install constriction' to use ANS"
+        )
+
     if param_name == "sh0":
         import pdb; pdb.set_trace()
     if not np.all(meta["shape"]):
@@ -413,6 +421,12 @@ def _compress_gaussian_ans(
     Returns:
         Dict[str, Any]: metadata
     """
+    try:
+        import constriction
+    except:
+        raise ImportError(
+            "Please install constriction with 'pip install constriction' to use ANS"
+        )
 
     mins = torch.amin(params, dim=0)
     maxs = torch.amax(params, dim=0)
@@ -683,7 +697,7 @@ def _compress_kmeans(
             "dtype": str(params.dtype).split(".")[1],
         }
         return meta
-    # import pdb; pdb.set_trace()
+    
     kmeans = KMeans(n_clusters=n_clusters, distance="manhattan", verbose=verbose)
     x = params.reshape(params.shape[0], -1).permute(1, 0).contiguous()
     labels = kmeans.fit(x)

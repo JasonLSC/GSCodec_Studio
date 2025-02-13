@@ -25,7 +25,8 @@ cd examples
 pip install -r requirements.txt
 # download mipnerf_360 benchmark data
 python datasets/download_dataset.py
-# place other dataset under 'data' folder
+# or place other dataset under 'data' folder
+ln -s data/tandt /xxxx/Dataset/tandt
 ```
 
 We also use third-party library, 'python-fpnge', to accelerate image saving operations during the experiment for now. 
