@@ -48,3 +48,15 @@ bash benchmarks/compression/final_exp/mcmc_tt_sim.sh
 
 **Extract Per-Frame Static Gaussian from Dynamic Splats**
 (Will be provided on 2/15/2025)
+
+## Contributors
+
+This project is developed by the following contributors:
+
+- Sicheng Li: jasonlisicheng@zju.edu.cn
+- Chengzhen Wu: chengzhenwu@zju.edu.cn
+
+If you have any questions about this project, please feel free to contact us.
+
+## Acknowledgement
+This project is bulit on [gsplat](https://github.com/nerfstudio-project/gsplat). We thank all contributors from [gsplat](https://github.com/nerfstudio-project/gsplat) for building such a great open-source project.
