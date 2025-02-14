@@ -135,7 +135,6 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, near, far, 
         uid = intr.id
         R = np.transpose(qvec2rotmat(extr.qvec))
         T = np.array(extr.tvec)
-
         if intr.model=="SIMPLE_PINHOLE":
             focal_length_x = intr.params[0]
             FovY = focal2fov(focal_length_x, height)

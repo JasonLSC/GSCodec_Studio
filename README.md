@@ -60,14 +60,25 @@ pip install git+https://github.com/fraunhoferhhi/PLAS.git
 We provide a script that enables more memory-efficient Gaussian splats while maintaining high visual quality, such as representing the Truck scene with only about 8MB of storage. The script includes 1) the static splats training with compression simulation, 2) the compression of trained static splats, and 3) the metric evaluation of uncompressed and compressed static splats.
 
 ```bash
+# Tanks and Temples dataset
 bash benchmarks/compression/final_exp/mcmc_tt_sim.sh
 ```
 
 **Dynamic Gaussian Splats Training and Compression**
-(Will be provided on 2/15/2025)
+First, please follow the dataset preprocessing instruction described in the [file]((mpeg_gsc_utils/multiview_video_preprocess/README.md)) for training data prepration.
+
+Next, run the script for dynamic gaussian splats training and compression.
+```bash
+cd examples
+bash benchmarks/dyngs/dyngs.sh
+```
 
 **Extract Per-Frame Static Gaussian from Dynamic Splats**
-(Will be provided on 2/15/2025)
+If you finsh the training of dynamic splats, then you can use the script to extract static gaussian splats stored at discrte timesteps in ".ply" file
+```bash
+cd examples
+bash benchmarks/dyngs/export_plys.sh
+```
 
 ## Contributors
 

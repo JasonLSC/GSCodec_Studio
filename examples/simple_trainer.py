@@ -1356,9 +1356,9 @@ def main(local_rank: int, world_rank, world_size: int, cfg: Config):
         for k in runner.splats.keys():
             runner.splats[k].data = torch.cat([ckpt["splats"][k] for ckpt in ckpts])
         step = ckpts[0]["step"]
-        # runner.save_params_into_ply_file()
-        # runner.eval(step=step)
-        # runner.render_traj(step=step)
+        runner.save_params_into_ply_file()
+        runner.eval(step=step)
+        runner.render_traj(step=step)
         if cfg.compression is not None:
             if cfg.compression == "entropy_coding":
                 runner.load_entropy_model_from_ckpt(ckpts[0], cfg.entropy_model_type)
