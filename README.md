@@ -65,6 +65,7 @@ bash benchmarks/compression/final_exp/mcmc_tt_sim.sh
 ```
 
 **Dynamic Gaussian Splats Training and Compression**
+
 First, please follow the dataset preprocessing instruction described in the [file]((mpeg_gsc_utils/multiview_video_preprocess/README.md)) for training data prepration.
 
 Next, run the script for dynamic gaussian splats training and compression.
@@ -74,6 +75,7 @@ bash benchmarks/dyngs/dyngs.sh
 ```
 
 **Extract Per-Frame Static Gaussian from Dynamic Splats**
+
 If you finsh the training of dynamic splats, then you can use the script to extract static gaussian splats stored at discrte timesteps in ".ply" file
 ```bash
 cd examples
