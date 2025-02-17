@@ -177,9 +177,9 @@ class Config:
     enable_autograd_detect_anomaly: bool = False
 
     # Enable exporting dynamic splats to per-frame ply files
-    enable_dyn_splats_export: bool = True
+    enable_dyn_splats_export: bool = False
     # Time-variant opacity based pruning
-    temp_opa_vis_pruning: bool = True
+    temp_opa_vis_pruning: bool = False
     # ply file saving mode
     sliced_splats_saving_mode: Literal["splats", "pcd"] = "splats"
     
@@ -1161,6 +1161,11 @@ class Runner:
             shutil.rmtree(ply_dir)
         os.makedirs(ply_dir, exist_ok=True)
 
+        if self.cfg.temp_opa_vis_pruning:
+            print("[Info] Pruning splats whose opacities are below threshold before saving splats into .ply files.")
+        else:
+            print("[Info] Directly saving splats into .ply files, without pruning.")
+
         for f_id in range(cfg.duration):
             timestamp = f_id/cfg.duration
             sliced_splats = self.get_sliced_splats_from_dyn_splats(self.splats, timestamp, self.cfg.temp_opa_vis_pruning)
@@ -1203,7 +1208,7 @@ class Runner:
         means_motion = means + motion[:, 0:3] * tforpoly + motion[:, 3:6] * tforpoly * tforpoly + motion[:, 6:9] * tforpoly *tforpoly * tforpoly
         # Calculate rotations
         rotations = torch.nn.functional.normalize(quats + tforpoly * omega)
-        import pdb; pdb.set_trace()
+        # import pdb; pdb.set_trace()
         if opa_vis_mask:
             vis_mask = trbfoutput.squeeze() > 0.05
             means_motion = means_motion[vis_mask]
@@ -1215,17 +1220,20 @@ class Runner:
             num_vis_mask = vis_mask.sum()
             num_all_splats = vis_mask.shape[0]
         
+        def inverse_sigmoid(x):
+            return torch.log(x/(1-x))
+
         sliced_splats = {
             "means": means_motion,
-            "scales": scales,
+            "scales": torch.log(scales),
             "quats": rotations,
-            "opacities": opacity,
+            "opacities": inverse_sigmoid(opacity),
             "rgb": color
         }
 
         return sliced_splats
 
-    def save_static_splats_to_ply(self, path, splats, mode="splats"):
+    def save_static_splats_to_ply(self, path, splats, mode="splats", use_text=False):
         from plyfile import PlyElement, PlyData
         
         xyz = splats["means"].detach().cpu().numpy()
@@ -1235,29 +1243,31 @@ class Runner:
         rgb = splats["rgb"].detach().contiguous().cpu().numpy()
 
         if mode == "splats":
+            sh0 = rgb_to_sh(rgb)
+
             dtype_full = [(attribute, 'f4') for attribute in construct_list_of_attributes()]
             elements = np.empty(xyz.shape[0], dtype=dtype_full)
-            attributes = np.concatenate((xyz, scales, quats, opacities, rgb), axis=1)
+            attributes = np.concatenate((xyz, scales, quats, opacities, sh0), axis=1)
             elements[:] = list(map(tuple, attributes))
+
         elif mode == "pcd":
             rgb = np.round(np.clip(rgb, 0, 1) * 255).astype(np.uint8)
+
             dtype_full = [('x', 'f4'), ('y', 'f4'), ('z', 'f4'),
                           ('red', 'u1'), ('green', 'u1'), ('blue', 'u1')]
-
             elements = np.empty(len(xyz), dtype=dtype_full)
             
             elements['x'] = xyz[:, 0]
             elements['y'] = xyz[:, 1]
             elements['z'] = xyz[:, 2]
-        
             elements['red'] = rgb[:, 0]
             elements['green'] = rgb[:, 1]
             elements['blue'] = rgb[:, 2]
 
         el = PlyElement.describe(elements, 'vertex')
-        PlyData([el], text=True).write(path) 
+        PlyData([el], text=use_text).write(path) 
 
-        print(f"Save splats to: {path}")
+        print(f"Save {xyz.shape[0]} splats to: {path}")
 
 def construct_list_of_attributes():
     l = ['x', 'y', 'z']
@@ -1267,7 +1277,7 @@ def construct_list_of_attributes():
         l.append('rot_{}'.format(i))
     l.append('opacity')
     for i in range(3):
-        l.append('sh0_{}'.format(i))
+        l.append('f_dc_{}'.format(i))
 
     return l
 
@@ -1287,8 +1297,9 @@ def main(cfg: Config):
         runner.decoder.load_state_dict(ckpts[0]["decoder"])
         step = ckpts[0]["step"]
 
-        print(f"Evaluate ckpt saved at step {step}")
-        runner.eval(step=step)
+        if cfg.compression is not None:
+            print(f"Evaluate ckpt saved at step {step}")
+            runner.eval(step=step)
 
         # print(f"Render trajectory using ckpt saved at step {step}")
         # runner.render_traj(step=step)

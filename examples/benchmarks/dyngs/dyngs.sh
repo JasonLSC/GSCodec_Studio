@@ -7,6 +7,12 @@ TEST_VIEWS=(
     ["Bartender"]="8 10 12"
 )
 
+declare -A START_FRAMES
+START_FRAMES=(
+    ["CBA"]=0
+    ["Bartender"]=50
+)
+
 RESULT_DIR="results/dyngs"
 
 NUM_FRAME=65
@@ -15,28 +21,29 @@ run_single_scene() {
     local GPU_ID=$1
     local SCENE=$2
     local TEST_VIEW_IDS=${TEST_VIEWS[$SCENE]}
+    local START_FRAME=${START_FRAMES[$SCENE]}
 
-    echo "Running $SCENE"
+    echo "Running $SCENE START_FRAME @ ${START_FRAME}"
 
-    CUDA_VISIBLE_DEVICES=$GPU_ID python simple_trainer_dyngs.py compression_sim \
-        --model_path $RESULT_DIR/$SCENE/ \
-        --data_dir $SCENE_DIR/$SCENE/colmap/colmap_50 \
-        --result_dir $RESULT_DIR/$SCENE/ \
-        --downscale_factor 1 \
-        --duration $NUM_FRAME \
-        --batch_size 2 \
-        --max_steps 60_000 \
-        --refine_start_iter 3_000 \
-        --refine_stop_iter 30_000 \
-        --refine_every 100 \
-        --reset_every 6_000 \
-        --pause_refine_after_reset 500 \
-        --strategy Modified_STG_Strategy \
-        --test_view_id $TEST_VIEW_IDS 
+    # CUDA_VISIBLE_DEVICES=$GPU_ID python simple_trainer_dyngs.py compression_sim \
+    #     --model_path $RESULT_DIR/$SCENE/ \
+    #     --data_dir $SCENE_DIR/$SCENE/colmap/colmap_${START_FRAME} \
+    #     --result_dir $RESULT_DIR/$SCENE/ \
+    #     --downscale_factor 1 \
+    #     --duration $NUM_FRAME \
+    #     --batch_size 2 \
+    #     --max_steps 60_000 \
+    #     --refine_start_iter 3_000 \
+    #     --refine_stop_iter 30_000 \
+    #     --refine_every 100 \
+    #     --reset_every 6_000 \
+    #     --pause_refine_after_reset 500 \
+    #     --strategy Modified_STG_Strategy \
+    #     --test_view_id $TEST_VIEW_IDS 
     
     CUDA_VISIBLE_DEVICES=$GPU_ID python simple_trainer_dyngs.py default \
         --model_path $RESULT_DIR/$SCENE/ \
-        --data_dir $SCENE_DIR/$SCENE/colmap/colmap_50 \
+        --data_dir $SCENE_DIR/$SCENE/colmap/colmap_${START_FRAME} \
         --result_dir $RESULT_DIR/$SCENE/ \
         --downscale_factor 1 \
         --duration $NUM_FRAME \
@@ -46,7 +53,7 @@ run_single_scene() {
         --test_view_id $TEST_VIEW_IDS 
 }
 
-GPU_LIST=(7)
+GPU_LIST=(6)
 GPU_COUNT=${#GPU_LIST[@]}
 
 SCENE_IDX=-1
