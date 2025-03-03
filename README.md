@@ -30,6 +30,7 @@ pip install .
 ## Examples
 
 **Preparations**
+
 Same as gsplat, we need to install some extra dependencies and download the relevant datasets before the evaluation.
 
 ```bash
@@ -80,6 +81,15 @@ If you finsh the training of dynamic splats, then you can use the script to extr
 ```bash
 cd examples
 bash benchmarks/dyngs/export_plys.sh
+```
+
+**Load .ply File and Render**
+
+If you want to directly read and render splats exported as PLY files, you can use the following script.
+Note: You need to modify the PLY file path in the scripts.
+```bash
+cd examples
+bash benchmarks/load_ply_and_render.sh
 ```
 
 ## Contributors

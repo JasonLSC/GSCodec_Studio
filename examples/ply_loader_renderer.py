@@ -87,8 +87,10 @@ class ProfilerConfig:
 class Config:
     # Disable viewer
     disable_viewer: bool = False
-    # Path to the .pt files. If provide, it will skip training and run evaluation only.
+    # Path to the .ckpt files. If provide, it will skip training, load .ckpt file, and run evaluation only.
     ckpt: Optional[List[str]] = None
+    # Path to the .ply files. If provide, it will skip training, load .ply file, and run evaluation only.
+    ply_path: Optional[str] = None
     # Name of compression strategy to use
     compression: Optional[Literal["png", "entropy_coding", "hevc"]] = None
     # Quantization parameters when set to hevc
@@ -1412,21 +1414,29 @@ def main(local_rank: int, world_rank, world_size: int, cfg: Config):
 
     runner = Runner(local_rank, world_rank, world_size, cfg)
 
-    if cfg.ckpt is not None:
+    if cfg.ply_path is not None or cfg.ckpt is not None:
+        if cfg.ckpt is not None:
+            ckpts = [
+                torch.load(file, map_location=runner.device, weights_only=True)
+                for file in cfg.ckpt
+            ]
+            for k in runner.splats.keys():
+                runner.splats[k].data = torch.cat([ckpt["splats"][k] for ckpt in ckpts])
+            step = ckpts[0]["step"]
         # run eval only
-        ckpts = [
-            torch.load(file, map_location=runner.device, weights_only=True)
-            for file in cfg.ckpt
-        ]
-        for k in runner.splats.keys():
-            runner.splats[k].data = torch.cat([ckpt["splats"][k] for ckpt in ckpts])
-        step = ckpts[0]["step"]
+
+        if cfg.ply_path is not None:
+            splats_param = load_ply(cfg.ply_path)
+            for k in runner.splats.keys():
+                runner.splats[k].data = splats_param[k].data.to(runner.device)
+            step = -1
+        
         runner.save_params_into_ply_file()
         runner.eval(step=step)
         runner.render_traj(step=step)
         if cfg.compression is not None:
-            if cfg.compression == "entropy_coding":
-                runner.load_entropy_model_from_ckpt(ckpts[0], cfg.entropy_model_type)
+            # if cfg.compression == "entropy_coding":
+            #     runner.load_entropy_model_from_ckpt(ckpts[0], cfg.entropy_model_type)
             runner.run_compression(step=step)
     else:
         runner.train()
