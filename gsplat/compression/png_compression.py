@@ -76,7 +76,10 @@ class PngCompression:
         else:
             return _decompress_npz
 
-    def compress(self, compress_dir: str, splats: Dict[str, Tensor], entropy_models: Dict[str, Module] = None) -> None:
+    def compress(self, 
+                 compress_dir: str, 
+                 splats: Dict[str, Tensor], 
+                 entropy_models: Dict[str, Module] = None) -> None:
         """Run compression
 
         Args:
@@ -116,6 +119,8 @@ class PngCompression:
                 "n_sidelen": n_sidelen,
                 "verbose": self.verbose,
             }
+            if param_name == "shN":
+                kwargs.update({"n_clusters": 16384})
             meta[param_name] = compress_fn(
                 compress_dir, param_name, splats[param_name], **kwargs
             )
@@ -552,8 +557,8 @@ def _compress_masked_kmeans(
     mask = (params > 0).any(dim=1).any(dim=1).reshape(-1)
     mask_flat = mask.cpu().numpy().astype(bool)
     n = len(mask_flat)
-    n_bytes = (n + 7) // 8  # 需要的字节数
-    bits = np.packbits(mask_flat)[:n_bytes]  # 打包成bytes
+    n_bytes = (n + 7) // 8  
+    bits = np.packbits(mask_flat)[:n_bytes]  
     bits.tofile(os.path.join(compress_dir, f"mask.bin"))
 
     # select vaild shN
