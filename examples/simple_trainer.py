@@ -17,7 +17,7 @@ import tqdm
 import tyro
 import viser
 import yaml
-from datasets.colmap import Dataset, Parser
+from datasets.colmap import Dataset, GSCDataset, Parser
 from datasets.traj import (
     generate_interpolated_path,
     generate_ellipse_path_z,
@@ -241,6 +241,11 @@ class Config:
     tb_every: int = 100
     # Save training images to tensorboard
     tb_save_image: bool = False
+
+    # Scene type
+    scene_type: Literal["GSC", "default"] = "default"
+    # Test view id
+    test_view_id: Optional[List[int]] = None
 
     lpips_net: Literal["vgg", "alex"] = "alex"
 
@@ -482,13 +487,26 @@ class Runner:
             normalize=cfg.normalize_world_space,
             test_every=cfg.test_every,
         )
-        self.trainset = Dataset(
-            self.parser,
-            split="train",
-            patch_size=cfg.patch_size,
-            load_depths=cfg.depth_loss,
-        )
-        self.valset = Dataset(self.parser, split="val")
+        if cfg.scene_type == "GSC" and cfg.test_view_id is not None: # GSC mode
+            self.trainset = GSCDataset(
+                self.parser,
+                split="train",
+                patch_size=cfg.patch_size,
+                load_depths=cfg.depth_loss,
+                test_view_ids=cfg.test_view_id,
+            )
+            self.valset = GSCDataset(
+                self.parser, 
+                split="val", 
+                test_view_ids=cfg.test_view_id,)
+        else: # default mode
+            self.trainset = Dataset(
+                self.parser,
+                split="train",
+                patch_size=cfg.patch_size,
+                load_depths=cfg.depth_loss,
+            )
+            self.valset = Dataset(self.parser, split="val")
         self.scene_scale = self.parser.scene_scale * 1.1 * cfg.global_scale
         print("Scene scale:", self.scene_scale)
 
@@ -1170,8 +1188,8 @@ class Runner:
 
             if world_rank == 0:
                 # write images 
-                # canvas = torch.cat(canvas_list, dim=2).squeeze(0).cpu().numpy() # side by side
-                canvas = canvas_list[1].squeeze(0).cpu().numpy() # signle image
+                canvas = torch.cat(canvas_list, dim=2).squeeze(0).cpu().numpy() # side by side
+                # canvas = canvas_list[1].squeeze(0).cpu().numpy() # signle image
                 canvas = (canvas * 255).astype(np.uint8)
                 imageio.imwrite(
                     f"{self.render_dir}/{stage}_step{step}_{i:04d}.png",

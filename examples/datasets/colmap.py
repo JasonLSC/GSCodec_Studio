@@ -384,6 +384,38 @@ class Dataset:
 
         return data
 
+class GSCDataset(Dataset):
+    """Dataset class for GSC with scene-specific train/test view split."""
+    
+    def __init__(
+        self,
+        parser: Parser,
+        split: str = "train",
+        patch_size: Optional[int] = None,
+        load_depths: bool = False,
+        test_view_ids: Optional[List[int]] = None
+    ):
+        # Call parent class constructor without setting indices
+        super().__init__(parser, split, patch_size, load_depths)
+        
+        if test_view_ids is None:
+            # If no custom test view indices are provided, use the default split from parent class
+            return
+            
+        # Convert indices to sets for efficient lookup
+        all_indices = set(range(len(self.parser.image_names)))
+        test_indices = set(test_view_ids)
+        train_indices = all_indices - test_indices  # Set difference operation
+        
+        # Select indices based on split
+        if split == "train":
+            self.indices = np.array(list(train_indices))
+        else:
+            self.indices = np.array(list(test_indices))
+            print(f"The test view id is: {self.indices}.")
+        
+        # Ensure indices are sorted
+        self.indices.sort()
 
 if __name__ == "__main__":
     import argparse
