@@ -99,6 +99,11 @@ class PngCompression:
         # Param-specific preprocessing
         splats["means"] = log_transform(splats["means"])
         splats["quats"] = F.normalize(splats["quats"], dim=-1)
+        # import pdb; pdb.set_trace()
+
+        # Constraint on quats
+        # mask = splats["quats"][:,0] < 0
+        # splats["quats"][mask] = -splats["quats"][mask]
 
         n_gs = len(splats["means"])
         n_sidelen = int(n_gs**0.5)
