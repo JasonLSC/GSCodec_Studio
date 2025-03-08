@@ -6,7 +6,7 @@ import shutil
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple, Union, ContextManager
+from typing import Dict, List, Optional, Tuple, Union, ContextManager, TypedDict
 
 import imageio
 import nerfview
@@ -31,6 +31,7 @@ from fused_ssim import fused_ssim
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from typing_extensions import Literal, assert_never
 from gsplat import strategy
+from gsplat import compression
 from gsplat.compression.entropy_coding_compression import EntropyCodingCompression
 from gsplat.compression_simulation import simulation
 from utils import AppearanceOptModule, CameraOptModule, knn, rgb_to_sh, set_random_seed
@@ -77,11 +78,20 @@ class ProfilerConfig:
         )
     
     def update_schedule(self, **kwargs):
-        """动态更新schedule参数"""
         for key, value in kwargs.items():
             if hasattr(self, key):
                 setattr(self, key, value)
         self.schedule = self._create_schedule()
+
+class CompressionConfig(TypedDict, total=False):
+    # Use PLAS sort in compression or not
+    use_sort: Optional[bool] = field(default=None)
+    # Verbose or not
+    verbose: Optional[bool] = field(default=None) 
+    # QP value for video coding
+    qp: int = 4
+    # Number of cluster of VQ for shN compression
+    n_clusters: int = 32768
 
 @dataclass
 class Config:
@@ -93,45 +103,49 @@ class Config:
     ply_path: Optional[str] = None
     # Name of compression strategy to use
     compression: Optional[Literal["png", "entropy_coding", "hevc"]] = None
-    # Quantization parameters when set to hevc
-    qp: Optional[int] = None
+    # # Quantization parameters when set to hevc
+    # qp: Optional[int] = None
+    # Configuration for compression methods
+    compression_cfg: CompressionConfig = field(
+        default_factory=CompressionConfig
+    )
 
     # Enable profiler
     profiler_enabled: bool = False
 
     # Enable compression simulation
     compression_sim: bool = False
-    # Name of quantization simulation strategy to use
-    quantization_sim: Optional[Literal["round", "noise", "vq"]] = None
+    # # Name of quantization simulation strategy to use
+    # quantization_sim: Optional[Literal["round", "noise", "vq"]] = None
 
-    # Enable entropy model
-    entropy_model_opt: bool = False
-    # Define the type of entropy model
-    entropy_model_type: Literal["factorized_model", "gaussian_model"] = "factorized_model"
-    # Bit-rate distortion trade-off parameter
-    rd_lambda: float = 1e-2 # default: 1e-2
-    # Steps to enable entropy model into training pipeline
-    # factorized model:
-    entropy_steps: Dict[str, int] = field(default_factory=lambda: {"means": -1, 
-                                                                   "quats": 10_000, 
-                                                                   "scales": 10_000, 
-                                                                   "opacities": 10_000, 
-                                                                   "sh0": 20_000, 
-                                                                   "shN": 10_000})
-    # gaussian model:
+    # # Enable entropy model
+    # entropy_model_opt: bool = False
+    # # Define the type of entropy model
+    # entropy_model_type: Literal["factorized_model", "gaussian_model"] = "factorized_model"
+    # # Bit-rate distortion trade-off parameter
+    # rd_lambda: float = 1e-2 # default: 1e-2
+    # # Steps to enable entropy model into training pipeline
+    # # factorized model:
     # entropy_steps: Dict[str, int] = field(default_factory=lambda: {"means": -1, 
     #                                                                "quats": 10_000, 
     #                                                                "scales": 10_000, 
     #                                                                "opacities": 10_000, 
     #                                                                "sh0": 20_000, 
-    #                                                                "shN": -1})
+    #                                                                "shN": 10_000})
+    # # gaussian model:
+    # # entropy_steps: Dict[str, int] = field(default_factory=lambda: {"means": -1, 
+    # #                                                                "quats": 10_000, 
+    # #                                                                "scales": 10_000, 
+    # #                                                                "opacities": 10_000, 
+    # #                                                                "sh0": 20_000, 
+    # #                                                                "shN": -1})
 
-    # Enable shN adaptive mask
-    shN_ada_mask_opt: bool = False
-    # Steps to enable shN adaptive mask
-    ada_mask_steps: int = 10_000
-    # Strategy to obtain adaptive mask
-    shN_ada_mask_strategy: Optional[str] = "learnable" # "gradient"
+    # # Enable shN adaptive mask
+    # shN_ada_mask_opt: bool = False
+    # # Steps to enable shN adaptive mask
+    # ada_mask_steps: int = 10_000
+    # # Strategy to obtain adaptive mask
+    # shN_ada_mask_strategy: Optional[str] = "learnable" # "gradient"
     
     # Render trajectory path
     render_traj_path: str = "interp"
@@ -533,17 +547,17 @@ class Runner:
         )
         print("Model initialized. Number of GS:", len(self.splats["means"]))
 
-        # Densification Strategy
-        self.cfg.strategy.check_sanity(self.splats, self.optimizers)
+        # # Densification Strategy
+        # self.cfg.strategy.check_sanity(self.splats, self.optimizers)
 
-        if isinstance(self.cfg.strategy, DefaultStrategy):
-            self.strategy_state = self.cfg.strategy.initialize_state(
-                scene_scale=self.scene_scale
-            )
-        elif isinstance(self.cfg.strategy, MCMCStrategy):
-            self.strategy_state = self.cfg.strategy.initialize_state()
-        else:
-            assert_never(self.cfg.strategy)
+        # if isinstance(self.cfg.strategy, DefaultStrategy):
+        #     self.strategy_state = self.cfg.strategy.initialize_state(
+        #         scene_scale=self.scene_scale
+        #     )
+        # elif isinstance(self.cfg.strategy, MCMCStrategy):
+        #     self.strategy_state = self.cfg.strategy.initialize_state()
+        # else:
+        #     assert_never(self.cfg.strategy)
 
         # Compression Strategy
         self.compression_method = None
@@ -553,91 +567,15 @@ class Runner:
             elif  cfg.compression == "entropy_coding":
                 self.compression_method = EntropyCodingCompression()
             elif cfg.compression == "hevc":
-                self.compression_method = HevcCompression(qp=cfg.qp)
+                self.compression_method = HevcCompression(**cfg.compression_cfg) # compression_cfg=cfg.compression_cfg
             else:
                 raise ValueError(f"Unknown compression strategy: {cfg.compression}")
-        
-        if cfg.compression_sim:
-            cap_max = cfg.strategy.cap_max if cfg.strategy.cap_max is not None else None
-            self.compression_sim_method = CompressionSimulation(cfg.entropy_model_opt, 
-                                                    cfg.entropy_model_type,
-                                                    cfg.entropy_steps, 
-                                                    self.device, 
-                                                    cfg.shN_ada_mask_opt,
-                                                    cfg.ada_mask_steps,
-                                                    cfg.shN_ada_mask_strategy,
-                                                    cap_max=cap_max,)
-            # if cfg.shN_ada_mask_opt and cfg.shN_ada_mask_strategy == "gradient":
-            #     self.compression_sim_method.register_shN_gradient_threshold_hook(self.splats["shN"])
-
-            if cfg.entropy_model_opt:
-                selected_key = min((k for k, v in cfg.entropy_steps.items() if v > 0), key=lambda k: cfg.entropy_steps[k])
-                self.entropy_min_step = cfg.entropy_steps[selected_key]
         
         # Profiler
         self.profiler: Optional[torch.profiler.profile] = None
         self.profiler_config = ProfilerConfig()
         if cfg.profiler_enabled:
             self.profiler_config.enabled = True
-
-        self.pose_optimizers = []
-        if cfg.pose_opt:
-            self.pose_adjust = CameraOptModule(len(self.trainset)).to(self.device)
-            self.pose_adjust.zero_init()
-            self.pose_optimizers = [
-                torch.optim.Adam(
-                    self.pose_adjust.parameters(),
-                    lr=cfg.pose_opt_lr * math.sqrt(cfg.batch_size),
-                    weight_decay=cfg.pose_opt_reg,
-                )
-            ]
-            if world_size > 1:
-                self.pose_adjust = DDP(self.pose_adjust)
-
-        if cfg.pose_noise > 0.0:
-            self.pose_perturb = CameraOptModule(len(self.trainset)).to(self.device)
-            self.pose_perturb.random_init(cfg.pose_noise)
-            if world_size > 1:
-                self.pose_perturb = DDP(self.pose_perturb)
-
-        self.app_optimizers = []
-        if cfg.app_opt:
-            assert feature_dim is not None
-            self.app_module = AppearanceOptModule(
-                len(self.trainset), feature_dim, cfg.app_embed_dim, cfg.sh_degree
-            ).to(self.device)
-            # initialize the last layer to be zero so that the initial output is zero.
-            torch.nn.init.zeros_(self.app_module.color_head[-1].weight)
-            torch.nn.init.zeros_(self.app_module.color_head[-1].bias)
-            self.app_optimizers = [
-                torch.optim.Adam(
-                    self.app_module.embeds.parameters(),
-                    lr=cfg.app_opt_lr * math.sqrt(cfg.batch_size) * 10.0,
-                    weight_decay=cfg.app_opt_reg,
-                ),
-                torch.optim.Adam(
-                    self.app_module.color_head.parameters(),
-                    lr=cfg.app_opt_lr * math.sqrt(cfg.batch_size),
-                ),
-            ]
-            if world_size > 1:
-                self.app_module = DDP(self.app_module)
-
-        self.bil_grid_optimizers = []
-        if cfg.use_bilateral_grid:
-            self.bil_grids = BilateralGrid(
-                len(self.trainset),
-                grid_X=cfg.bilateral_grid_shape[0],
-                grid_Y=cfg.bilateral_grid_shape[1],
-                grid_W=cfg.bilateral_grid_shape[2],
-            ).to(self.device)
-            self.bil_grid_optimizers = [
-                torch.optim.Adam(
-                    self.bil_grids.parameters(),
-                    lr=2e-3 * math.sqrt(cfg.batch_size),
-                    eps=1e-15,
-                ),
-            ]
 
         # Losses & Metrics.
         self.ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(self.device)
@@ -691,19 +629,18 @@ class Runner:
         masks: Optional[Tensor] = None,
         **kwargs,
     ) -> Tuple[Tensor, Tensor, Dict]:
-        if not self.cfg.compression_sim:
-            means = self.splats["means"]  # [N, 3]
-            quats = self.splats["quats"]  # [N, 4]
-            scales = torch.exp(self.splats["scales"])  # [N, 3]
-            opacities = torch.sigmoid(self.splats["opacities"])  # [N,]
-            sh0, shN = self.splats["sh0"], self.splats["shN"]
-        else:
+        
+        means = self.splats["means"]  # [N, 3]
+        quats = self.splats["quats"]  # [N, 4]
+        scales = torch.exp(self.splats["scales"])  # [N, 3]
+        opacities = torch.sigmoid(self.splats["opacities"])  # [N,]
+        sh0, shN = self.splats["sh0"], self.splats["shN"]
+        if self.cfg.compression_sim:
             means = self.comp_sim_splats["means"]  # [N, 3]
             quats = self.comp_sim_splats["quats"]  # [N, 4]
             scales = torch.exp(self.comp_sim_splats["scales"])  # [N, 3]
             opacities = torch.sigmoid(self.comp_sim_splats["opacities"])  # [N,]
             sh0, shN = self.comp_sim_splats["sh0"], self.comp_sim_splats["shN"]
-
 
         image_ids = kwargs.pop("image_ids", None)
         if self.cfg.app_opt:
@@ -744,409 +681,6 @@ class Runner:
         if masks is not None:
             render_colors[~masks] = 0
         return render_colors, render_alphas, info
-
-    def train(self):
-        cfg = self.cfg
-        device = self.device
-        world_rank = self.world_rank
-        world_size = self.world_size
-
-        # Dump cfg.
-        if world_rank == 0:
-            with open(f"{cfg.result_dir}/cfg.yml", "w") as f:
-                yaml.dump(vars(cfg), f)
-
-        max_steps = cfg.max_steps
-        init_step = 0
-
-        schedulers = [
-            # means has a learning rate schedule, that end at 0.01 of the initial value
-            torch.optim.lr_scheduler.ExponentialLR(
-                self.optimizers["means"], gamma=0.01 ** (1.0 / max_steps)
-            ),
-        ]
-        if cfg.pose_opt:
-            # pose optimization has a learning rate schedule
-            schedulers.append(
-                torch.optim.lr_scheduler.ExponentialLR(
-                    self.pose_optimizers[0], gamma=0.01 ** (1.0 / max_steps)
-                )
-            )
-        if cfg.use_bilateral_grid:
-            # bilateral grid has a learning rate schedule. Linear warmup for 1000 steps.
-            schedulers.append(
-                torch.optim.lr_scheduler.ChainedScheduler(
-                    [
-                        torch.optim.lr_scheduler.LinearLR(
-                            self.bil_grid_optimizers[0],
-                            start_factor=0.01,
-                            total_iters=1000,
-                        ),
-                        torch.optim.lr_scheduler.ExponentialLR(
-                            self.bil_grid_optimizers[0], gamma=0.01 ** (1.0 / max_steps)
-                        ),
-                    ]
-                )
-            )
-
-        trainloader = torch.utils.data.DataLoader(
-            self.trainset,
-            batch_size=cfg.batch_size,
-            shuffle=True,
-            num_workers=4,
-            persistent_workers=True,
-            pin_memory=True,
-        )
-        trainloader_iter = iter(trainloader)
-
-        with self.get_profiler(self.writer) as prof:
-            self.profiler = prof if self.profiler_config.enabled else None
-
-            # Training loop.
-            global_tic = time.time()
-            pbar = tqdm.tqdm(range(init_step, max_steps))
-            for step in pbar:
-                if not cfg.disable_viewer:
-                    while self.viewer.state.status == "paused":
-                        time.sleep(0.01)
-                    self.viewer.lock.acquire()
-                    tic = time.time()
-
-                try:
-                    data = next(trainloader_iter)
-                except StopIteration:
-                    trainloader_iter = iter(trainloader)
-                    data = next(trainloader_iter)
-
-                camtoworlds = camtoworlds_gt = data["camtoworld"].to(device)  # [1, 4, 4]
-                Ks = data["K"].to(device)  # [1, 3, 3]
-                pixels = data["image"].to(device) / 255.0  # [1, H, W, 3]
-                num_train_rays_per_step = (
-                    pixels.shape[0] * pixels.shape[1] * pixels.shape[2]
-                )
-                image_ids = data["image_id"].to(device)
-                masks = data["mask"].to(device) if "mask" in data else None  # [1, H, W]
-                if cfg.depth_loss:
-                    points = data["points"].to(device)  # [1, M, 2]
-                    depths_gt = data["depths"].to(device)  # [1, M]
-
-                height, width = pixels.shape[1:3]
-
-                if cfg.pose_noise:
-                    camtoworlds = self.pose_perturb(camtoworlds, image_ids)
-
-                if cfg.pose_opt:
-                    camtoworlds = self.pose_adjust(camtoworlds, image_ids)
-
-                # sh schedule
-                sh_degree_to_use = min(step // cfg.sh_degree_interval, cfg.sh_degree)
-
-                # compression simulation
-                if cfg.compression_sim and cfg.entropy_model_opt and cfg.entropy_model_type == "gaussian_model": # if hash-based gaussian model, need to estiblish bbox
-                    if step == self.entropy_min_step:
-                        self.compression_sim_method._estiblish_bbox(self.splats["means"])
-
-                if cfg.compression_sim:
-                    self.comp_sim_splats, self.esti_bits_dict = self.compression_sim_method.simulate_compression(self.splats, step)
-
-                # forward
-                renders, alphas, info = self.rasterize_splats(
-                    camtoworlds=camtoworlds,
-                    Ks=Ks,
-                    width=width,
-                    height=height,
-                    sh_degree=sh_degree_to_use,
-                    near_plane=cfg.near_plane,
-                    far_plane=cfg.far_plane,
-                    image_ids=image_ids,
-                    render_mode="RGB+ED" if cfg.depth_loss else "RGB",
-                    masks=masks,
-                )
-                if renders.shape[-1] == 4:
-                    colors, depths = renders[..., 0:3], renders[..., 3:4]
-                else:
-                    colors, depths = renders, None
-
-                if cfg.use_bilateral_grid:
-                    grid_y, grid_x = torch.meshgrid(
-                        (torch.arange(height, device=self.device) + 0.5) / height,
-                        (torch.arange(width, device=self.device) + 0.5) / width,
-                        indexing="ij",
-                    )
-                    grid_xy = torch.stack([grid_x, grid_y], dim=-1).unsqueeze(0)
-                    colors = slice(self.bil_grids, grid_xy, colors, image_ids)["rgb"]
-
-                if cfg.random_bkgd:
-                    bkgd = torch.rand(1, 3, device=device)
-                    colors = colors + bkgd * (1.0 - alphas)
-
-                self.cfg.strategy.step_pre_backward(
-                    params=self.splats,
-                    optimizers=self.optimizers,
-                    state=self.strategy_state,
-                    step=step,
-                    info=info,
-                )
-
-                # loss
-                l1loss = F.l1_loss(colors, pixels)
-                ssimloss = 1.0 - fused_ssim(
-                    colors.permute(0, 3, 1, 2), pixels.permute(0, 3, 1, 2), padding="valid"
-                )
-                loss = l1loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda
-                if cfg.depth_loss:
-                    # query depths from depth map
-                    points = torch.stack(
-                        [
-                            points[:, :, 0] / (width - 1) * 2 - 1,
-                            points[:, :, 1] / (height - 1) * 2 - 1,
-                        ],
-                        dim=-1,
-                    )  # normalize to [-1, 1]
-                    grid = points.unsqueeze(2)  # [1, M, 1, 2]
-                    depths = F.grid_sample(
-                        depths.permute(0, 3, 1, 2), grid, align_corners=True
-                    )  # [1, 1, M, 1]
-                    depths = depths.squeeze(3).squeeze(1)  # [1, M]
-                    # calculate loss in disparity space
-                    disp = torch.where(depths > 0.0, 1.0 / depths, torch.zeros_like(depths))
-                    disp_gt = 1.0 / depths_gt  # [1, M]
-                    depthloss = F.l1_loss(disp, disp_gt) * self.scene_scale
-                    loss += depthloss * cfg.depth_lambda
-                if cfg.use_bilateral_grid:
-                    tvloss = 10 * total_variation_loss(self.bil_grids.grids)
-                    loss += tvloss
-
-                # regularizations
-                if cfg.opacity_reg > 0.0:
-                    loss = (
-                        loss
-                        + cfg.opacity_reg
-                        * torch.abs(torch.sigmoid(self.splats["opacities"])).mean()
-                    )
-                if cfg.scale_reg > 0.0:
-                    loss = (
-                        loss
-                        + cfg.scale_reg * torch.abs(torch.exp(self.splats["scales"])).mean()
-                    )
-                
-                # entropy constraint
-                if cfg.entropy_model_opt and step>self.entropy_min_step:
-                    total_esti_bits = 0
-                    for n, n_step in cfg.entropy_steps.items():
-                        if step > n_step and self.esti_bits_dict[n] is not None:
-                            # maybe give different params with different weights
-                            total_esti_bits += torch.sum(self.esti_bits_dict[n]) / self.esti_bits_dict[n].numel() # bpp
-                        else:
-                            total_esti_bits += 0
-
-                    loss = (
-                        loss
-                        + cfg.rd_lambda * total_esti_bits
-                    )
-                
-                if cfg.compression_sim:
-                    if self.compression_sim_method.shN_ada_mask_opt and cfg.shN_ada_mask_strategy == "learnable" and step > cfg.ada_mask_steps:
-                        loss = loss + self.compression_sim_method.shN_ada_mask.get_sparsity_loss()
-                
-                # tmp workaround
-                loss_show = loss.detach().cpu()
-                loss.backward()
-                
-                desc = f"loss={loss_show.item():.3f}| " f"sh degree={sh_degree_to_use}| "
-                if cfg.depth_loss:
-                    desc += f"depth loss={depthloss.item():.6f}| "
-                if cfg.pose_opt and cfg.pose_noise:
-                    # monitor the pose error if we inject noise
-                    pose_err = F.l1_loss(camtoworlds_gt, camtoworlds)
-                    desc += f"pose err={pose_err.item():.6f}| "
-                pbar.set_description(desc)
-
-                # tensorboard monitor
-                if world_rank == 0 and cfg.tb_every > 0 and step % cfg.tb_every == 0:
-                    mem = torch.cuda.max_memory_allocated() / 1024**3
-                    self.writer.add_scalar("train/loss", loss.item(), step)
-                    self.writer.add_scalar("train/l1loss", l1loss.item(), step)
-                    self.writer.add_scalar("train/ssimloss", ssimloss.item(), step)
-                    self.writer.add_scalar("train/num_GS", len(self.splats["means"]), step)
-                    self.writer.add_scalar("train/mem", mem, step)
-                    if cfg.depth_loss:
-                        self.writer.add_scalar("train/depthloss", depthloss.item(), step)
-                    if cfg.use_bilateral_grid:
-                        self.writer.add_scalar("train/tvloss", tvloss.item(), step)
-                    if cfg.tb_save_image:
-                        canvas = torch.cat([pixels, colors], dim=2).detach().cpu().numpy()
-                        canvas = canvas.reshape(-1, *canvas.shape[2:])
-                        self.writer.add_image("train/render", canvas, step)
-                    if cfg.compression_sim:
-                        if cfg.entropy_model_opt and step>self.entropy_min_step:
-                            self.writer.add_histogram("train_hist/quats", self.splats["quats"], step)
-                            self.writer.add_histogram("train_hist/scales", self.splats["scales"], step)
-                            self.writer.add_histogram("train_hist/opacities", self.splats["opacities"], step)
-                            self.writer.add_histogram("train_hist/sh0", self.splats["sh0"], step)
-                            if total_esti_bits > 0:
-                                self.writer.add_scalar("train/bpp_loss", total_esti_bits.item(), step)
-                        if self.compression_sim_method.shN_ada_mask_opt and cfg.shN_ada_mask_strategy == "learnable" and step > cfg.ada_mask_steps:
-                            self.writer.add_scalar("train/ada_mask_ratio", self.compression_sim_method.shN_ada_mask.get_mask_ratio(), step)
-                        if self.compression_sim_method.shN_ada_mask_opt and cfg.shN_ada_mask_strategy == "gradient":
-                            mask_ratio = (self.splats["shN"] == 0).all(dim=-1).all(dim=-1).sum() / self.splats["shN"].size(0)
-                            self.writer.add_scalar("train/ada_mask_ratio", mask_ratio, step)
-                        
-                    self.writer.add_histogram("train_hist/means", self.splats["means"], step)
-                    self.writer.flush()
-
-                # save checkpoint before updating the model
-                if step in [i - 1 for i in cfg.save_steps] or step == max_steps - 1:
-                    mem = torch.cuda.max_memory_allocated() / 1024**3
-                    stats = {
-                        "mem": mem,
-                        "ellipse_time": time.time() - global_tic,
-                        "num_GS": len(self.splats["means"]),
-                    }
-                    print("Step: ", step, stats)
-                    with open(
-                        f"{self.stats_dir}/train_step{step:04d}_rank{self.world_rank}.json",
-                        "w",
-                    ) as f:
-                        json.dump(stats, f)
-                    
-                    if cfg.shN_ada_mask_opt and cfg.shN_ada_mask_strategy == "learnable" and step > cfg.ada_mask_steps:
-                        shN_ada_mask = self.compression_sim_method.shN_ada_mask.get_binary_mask()
-                        self.splats["shN"].data = self.splats["shN"].data * shN_ada_mask
-                    if cfg.shN_ada_mask_opt and cfg.shN_ada_mask_strategy == "gradient":
-                        shN_ada_mask = (self.splats["shN"].data != 0).any(dim=-1).any(dim=-1)
-                    
-                    # prepare data to be saved
-                    data = {"step": step, "splats": self.splats.state_dict()}
-                    if cfg.pose_opt:
-                        if world_size > 1:
-                            data["pose_adjust"] = self.pose_adjust.module.state_dict()
-                        else:
-                            data["pose_adjust"] = self.pose_adjust.state_dict()
-                    if cfg.app_opt:
-                        if world_size > 1:
-                            data["app_module"] = self.app_module.module.state_dict()
-                        else:
-                            data["app_module"] = self.app_module.state_dict()
-
-                    if cfg.shN_ada_mask_opt and step > cfg.ada_mask_steps:
-                        data["shN_ada_mask"] = shN_ada_mask
-                    
-                    if cfg.compression_sim and cfg.entropy_model_opt and cfg.compression == "entropy_coding":
-                        for name, entropy_model in self.compression_sim_method.entropy_models.items():
-                            if entropy_model is not None:
-                                data[name+"_entropy_model"] = entropy_model.state_dict()
-
-                    torch.save(
-                        data, f"{self.ckpt_dir}/ckpt_{step}_rank{self.world_rank}.pt"
-                    )
-
-                # Operations for modifying the gradient (given threshold) for adaptive shN masking
-                if cfg.shN_ada_mask_opt and cfg.shN_ada_mask_strategy == "gradient":
-                    self.compression_sim_method.shN_gradient_threshold(self.splats["shN"], step)
-                
-                # Turn Gradients into Sparse Tensor before running optimizer
-                if cfg.sparse_grad:
-                    assert cfg.packed, "Sparse gradients only work with packed mode."
-                    gaussian_ids = info["gaussian_ids"]
-                    for k in self.splats.keys():
-                        grad = self.splats[k].grad
-                        if grad is None or grad.is_sparse:
-                            continue
-                        self.splats[k].grad = torch.sparse_coo_tensor(
-                            indices=gaussian_ids[None],  # [1, nnz]
-                            values=grad[gaussian_ids],  # [nnz, ...]
-                            size=self.splats[k].size(),  # [N, ...]
-                            is_coalesced=len(Ks) == 1,
-                        )
-
-                # logic for 'visible_adam'
-                if cfg.visible_adam:
-                    gaussian_cnt = self.splats.means.shape[0]
-                    if cfg.packed:
-                        visibility_mask = torch.zeros_like(
-                            self.splats["opacities"], dtype=bool
-                        )
-                        visibility_mask.scatter_(0, info["gaussian_ids"], 1)
-                    else:
-                        visibility_mask = (info["radii"] > 0).any(0)
-
-                # optimize
-                for optimizer in self.optimizers.values():
-                    if cfg.visible_adam:
-                        optimizer.step(visibility_mask)
-                    else:
-                        optimizer.step()
-                    optimizer.zero_grad(set_to_none=True)
-                for optimizer in self.pose_optimizers:
-                    optimizer.step()
-                    optimizer.zero_grad(set_to_none=True)
-                for optimizer in self.app_optimizers:
-                    optimizer.step()
-                    optimizer.zero_grad(set_to_none=True)
-                for optimizer in self.bil_grid_optimizers:
-                    optimizer.step()
-                    optimizer.zero_grad(set_to_none=True)
-                for scheduler in schedulers:
-                    scheduler.step()
-                # (optional) entropy model params. optimize
-                if cfg.compression_sim:
-                    if cfg.entropy_model_opt:
-                        for name, optimizer in self.compression_sim_method.entropy_model_optimizers.items():
-                            if optimizer is not None:
-                                optimizer.step()
-                                optimizer.zero_grad(set_to_none=True)
-                        for name, scheduler in self.compression_sim_method.entropy_model_schedulers.items():
-                            if scheduler is not None and step > cfg.entropy_steps[name]:
-                                scheduler.step()
-                    # (optional) shN adaptive mask optimize
-                    if self.compression_sim_method.shN_ada_mask_opt and cfg.shN_ada_mask_strategy == "learnable" and step > cfg.ada_mask_steps:
-                        self.compression_sim_method.shN_ada_mask_optimizer.step()
-                        self.compression_sim_method.shN_ada_mask_optimizer.zero_grad(set_to_none=True)
-
-                # Run post-backward steps after backward and optimizer
-                if isinstance(self.cfg.strategy, DefaultStrategy):
-                    self.cfg.strategy.step_post_backward(
-                        params=self.splats,
-                        optimizers=self.optimizers,
-                        state=self.strategy_state,
-                        step=step,
-                        info=info,
-                        packed=cfg.packed,
-                    )
-                elif isinstance(self.cfg.strategy, MCMCStrategy):
-                    self.cfg.strategy.step_post_backward(
-                        params=self.splats,
-                        optimizers=self.optimizers,
-                        state=self.strategy_state,
-                        step=step,
-                        info=info,
-                        lr=schedulers[0].get_last_lr()[0],
-                    )
-                else:
-                    assert_never(self.cfg.strategy)
-
-                self.step_profiler()
-
-                # eval the full set
-                if step in [i - 1 for i in cfg.eval_steps]:
-                    self.eval(step)
-                    self.render_traj(step)
-
-                # run compression
-                if cfg.compression is not None and step in [i - 1 for i in cfg.eval_steps]:
-                    self.run_compression(step=step)
-
-                if not cfg.disable_viewer:
-                    self.viewer.lock.release()
-                    num_train_steps_per_sec = 1.0 / (time.time() - tic)
-                    num_train_rays_per_sec = (
-                        num_train_rays_per_step * num_train_steps_per_sec
-                    )
-                    # Update the viewer state.
-                    self.viewer.state.num_train_rays_per_sec = num_train_rays_per_sec
-                    # Update the scene.
-                    self.viewer.update(step, num_train_rays_per_step)
         
 
     @torch.no_grad()
@@ -1447,17 +981,17 @@ def main(local_rank: int, world_rank, world_size: int, cfg: Config):
             splats_param = load_ply(cfg.ply_path)
             for k in runner.splats.keys():
                 runner.splats[k].data = splats_param[k].data.to(runner.device)
-            step = -1
+            step = 0
         
-        runner.save_params_into_ply_file()
+        # runner.save_params_into_ply_file()
         runner.eval(step=step)
-        runner.render_traj(step=step)
+        # runner.render_traj(step=step)
         if cfg.compression is not None:
             # if cfg.compression == "entropy_coding":
             #     runner.load_entropy_model_from_ckpt(ckpts[0], cfg.entropy_model_type)
             runner.run_compression(step=step)
-    else:
-        runner.train()
+    # else: # no need for training
+    #     runner.train()
 
     if not cfg.disable_viewer:
         print("Viewer running... Ctrl+C to exit.")
@@ -1480,21 +1014,61 @@ if __name__ == "__main__":
     # Config objects we can choose between.
     # Each is a tuple of (CLI description, config object).
     configs = {
-        "default": (
-            "Gaussian splatting training using densification heuristics from the original paper.",
+        "png_compression":(
+            "Use PngCompression.",
             Config(
-                strategy=DefaultStrategy(verbose=True),
-            ),
+                compression="png",
+                compression_cfg=CompressionConfig()
+            )
         ),
-        "mcmc": (
-            "Gaussian splatting training using densification from the paper '3D Gaussian Splatting as Markov Chain Monte Carlo'.",
+        "x265_compression_rp0":(
+            "Use HevcCompression.",
             Config(
-                init_opa=0.5,
-                init_scale=0.1,
-                opacity_reg=0.01,
-                scale_reg=0.01,
-                strategy=MCMCStrategy(verbose=True),
-            ),
+                compression="hevc",
+                compression_cfg=CompressionConfig(use_sort=True,
+                                                  verbose=True,
+                                                  qp=4, 
+                                                  n_clusters=8192)
+            )
+        ),
+        "x265_compression_rp1":(
+            "Use HevcCompression.",
+            Config(
+                compression="hevc",
+                compression_cfg=CompressionConfig(use_sort=True,
+                                                  verbose=True,
+                                                  qp=10, 
+                                                  n_clusters=8192)
+            )
+        ),
+        "x265_compression_rp2":(
+            "Use HevcCompression.",
+            Config(
+                compression="hevc",
+                compression_cfg=CompressionConfig(use_sort=True,
+                                                  verbose=True,
+                                                  qp=16, 
+                                                  n_clusters=8192)
+            )
+        ),
+        "x265_compression_rp3":(
+            "Use HevcCompression.",
+            Config(
+                compression="hevc",
+                compression_cfg=CompressionConfig(use_sort=True,
+                                                  verbose=True,
+                                                  qp=22, 
+                                                  n_clusters=8192)
+            )
+        ),
+        "x265_compression_debug":(
+            "Use HevcCompression.",
+            Config(
+                compression="hevc",
+                compression_cfg=CompressionConfig(
+                                                  qp=22, 
+                                                  n_clusters=8192)
+            )
         ),
     }
     cfg = tyro.extras.overridable_config_cli(configs)

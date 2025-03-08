@@ -10,10 +10,10 @@ import torch.nn.functional as F
 from torch import Tensor
 from torch.nn import Module
 
+from gsplat import compression
 from gsplat.compression.outlier_filter import filter_splats
 from gsplat.compression.sort import sort_splats
 from gsplat.utils import inverse_log_transform, log_transform
-
 
 @dataclass
 class HevcCompression:
@@ -46,7 +46,8 @@ class HevcCompression:
 
     use_sort: bool = True
     verbose: bool = True
-    qp: int = 10
+    qp: int = 4
+    n_clusters: int = 32768
 
     def _get_compress_fn(self, param_name: str) -> Callable:
         compress_fn_map = {

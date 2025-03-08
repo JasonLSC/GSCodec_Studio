@@ -12,7 +12,7 @@ git clone https://github.com/JasonLSC/GSCodec_Studio.git --recursive
 cd GSCodec_Studio
 
 # Make a conda environment
-conda create --name gscodec_studio python=3.9
+conda create --name gscodec_studio python=3.12
 conda activate gscodec_studio
 ```
 
