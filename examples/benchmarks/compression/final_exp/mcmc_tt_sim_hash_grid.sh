@@ -1,7 +1,7 @@
 # ----------------- Training Setting-------------- #
 SCENE_DIR="data/tandt"
 # eval all 9 scenes for benchmarking
-SCENE_LIST="train truck" #  truck
+SCENE_LIST="train " #  truck 
 # SCENE_LIST="garden bicycle stump bonsai counter kitchen room treehill flowers"
 
 # # 0.36M GSs
@@ -41,15 +41,15 @@ run_single_scene() {
     echo "Running $SCENE on GPU: $GPU_ID"
 
     # train without eval
-    CUDA_VISIBLE_DEVICES=$GPU_ID python simple_trainer.py mcmc --eval_steps -1 --disable_viewer --data_factor 1 \
-        --strategy.cap-max $CAP_MAX \
-        --data_dir $SCENE_DIR/$SCENE/ \
-        --result_dir $RESULT_DIR/$SCENE/ \
-        --compression_sim \
-        --entropy_model_opt --entropy_model_type gaussian_model \
-        --rd_lambda $RD_LAMBDA \
-        --shN_ada_mask_opt \
-        --compression entropy_coding 
+    # CUDA_VISIBLE_DEVICES=$GPU_ID python simple_trainer.py mcmc --eval_steps -1 --disable_viewer --data_factor 1 \
+    #     --strategy.cap-max $CAP_MAX \
+    #     --data_dir $SCENE_DIR/$SCENE/ \
+    #     --result_dir $RESULT_DIR/$SCENE/ \
+    #     --compression_sim \
+    #     --entropy_model_opt --entropy_model_type gaussian_model \
+    #     --rd_lambda $RD_LAMBDA \
+    #     --shN_ada_mask_opt \
+    #     --compression entropy_coding 
 
 
     # eval: use vgg for lpips to align with other benchmarks
@@ -67,31 +67,31 @@ run_single_scene() {
 
 
 # ----------------- Experiment Loop -------------- #
-# GPU_LIST=(5 7)
-# GPU_COUNT=${#GPU_LIST[@]}
+GPU_LIST=(3 4)
+GPU_COUNT=${#GPU_LIST[@]}
 
-# SCENE_IDX=-1
+SCENE_IDX=-1
 
-# for SCENE in $SCENE_LIST;
-# do
-#     SCENE_IDX=$((SCENE_IDX + 1))
-#     {
-#         run_single_scene ${GPU_LIST[$SCENE_IDX]} $SCENE
-#     } &
+for SCENE in $SCENE_LIST;
+do
+    SCENE_IDX=$((SCENE_IDX + 1))
+    {
+        run_single_scene ${GPU_LIST[$SCENE_IDX]} $SCENE
+    } &
 
-# done
+done
 
 # ----------------- Experiment Loop -------------- #
 
 # Wait for finishing the jobs across all scenes 
-wait
-echo "All scenes finished."
+# wait
+# echo "All scenes finished."
 
-# Zip the compressed files and summarize the stats
-if command -v zip &> /dev/null
-then
-    echo "Zipping results"
-    python benchmarks/compression/summarize_stats.py --results_dir $RESULT_DIR --scenes $SCENE_LIST
-else
-    echo "zip command not found, skipping zipping"
-fi
+# # Zip the compressed files and summarize the stats
+# if command -v zip &> /dev/null
+# then
+#     echo "Zipping results"
+#     python benchmarks/compression/summarize_stats.py --results_dir $RESULT_DIR --scenes $SCENE_LIST
+# else
+#     echo "zip command not found, skipping zipping"
+# fi
