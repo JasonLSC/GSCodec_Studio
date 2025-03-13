@@ -41,15 +41,15 @@ run_single_scene() {
     echo "Running $SCENE on GPU: $GPU_ID"
 
     # train without eval
-    # CUDA_VISIBLE_DEVICES=$GPU_ID python simple_trainer.py mcmc --eval_steps -1 --disable_viewer --data_factor 1 \
-    #     --strategy.cap-max $CAP_MAX \
-    #     --data_dir $SCENE_DIR/$SCENE/ \
-    #     --result_dir $RESULT_DIR/$SCENE/ \
-    #     --compression_sim \
-    #     --entropy_model_opt --entropy_model_type gaussian_model \
-    #     --rd_lambda $RD_LAMBDA \
-    #     --shN_ada_mask_opt \
-    #     --compression entropy_coding 
+    CUDA_VISIBLE_DEVICES=$GPU_ID python simple_trainer.py mcmc --eval_steps 10000 20000 30000 --disable_viewer --data_factor 1 \
+        --strategy.cap-max $CAP_MAX \
+        --data_dir $SCENE_DIR/$SCENE/ \
+        --result_dir $RESULT_DIR/$SCENE/ \
+        --compression_sim \
+        --entropy_model_opt --entropy_model_type gaussian_model \
+        --rd_lambda $RD_LAMBDA \
+        --shN_ada_mask_opt \
+        --compression entropy_coding 
 
 
     # eval: use vgg for lpips to align with other benchmarks
@@ -59,7 +59,11 @@ run_single_scene() {
         --result_dir $RESULT_DIR/$SCENE/ \
         --lpips_net vgg \
         --compression entropy_coding --entropy_model_type gaussian_model \
-        --ckpt $RESULT_DIR/$SCENE/ckpts/ckpt_29999_rank0.pt
+        --ckpt $RESULT_DIR/$SCENE/ckpts/ckpt_29999_rank0.pt \
+        --compression_cfg.attribute_codec_registry.scales.encode _compress_gaussian_ans \
+        --compression_cfg.attribute_codec_registry.scales.decode _decompress_gaussian_ans \
+        --compression_cfg.attribute_codec_registry.quats.encode _compress_gaussian_ans \
+        --compression_cfg.attribute_codec_registry.quats.decode _decompress_gaussian_ans
     
 }
 # ----------------- Main Job --------------------- #
@@ -67,7 +71,7 @@ run_single_scene() {
 
 
 # ----------------- Experiment Loop -------------- #
-GPU_LIST=(3 4)
+GPU_LIST=(0 1)
 GPU_COUNT=${#GPU_LIST[@]}
 
 SCENE_IDX=-1
@@ -77,7 +81,7 @@ do
     SCENE_IDX=$((SCENE_IDX + 1))
     {
         run_single_scene ${GPU_LIST[$SCENE_IDX]} $SCENE
-    } &
+    } #&
 
 done
 

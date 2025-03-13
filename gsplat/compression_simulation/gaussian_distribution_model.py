@@ -84,7 +84,7 @@ class _grid_encode(Function):
 
         # n_levels first, optimize cache for cuda kernel, but needs an extra permute later
         outputs = torch.empty(n_levels_calc, N, n_features, device=inputs.device, dtype=embeddings.dtype)  # 创建一个buffer给cuda填充
-        # outputs = [hash层数=16, N_rays, channels=2]
+        # outputs = [hash level=16, N_rays, channels=2]
 
         # zero init if we only calculate partial levels
         # if n_levels_calc < n_levels: outputs.zero_()
@@ -123,7 +123,7 @@ class _grid_encode(Function):
                 min_level_id
                 )
 
-        # permute back to [N, n_levels * n_features]  # [N_rays, hash层数=16 * channels=2]
+        # permute back to [N, n_levels * n_features]  # [N_rays, hash_level=16 * channels=2]
         outputs = outputs.permute(1, 0, 2).reshape(N, n_levels_calc * n_features)
 
         ctx.save_for_backward(inputs, embeddings, offsets_list, resolutions_list, dy_dx, binary_vxl)

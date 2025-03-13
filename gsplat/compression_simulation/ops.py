@@ -73,3 +73,23 @@ class STE(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         return grad_output, None, None, None
+
+    
+class STE_binary(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input):
+        ctx.save_for_backward(input)
+        input = torch.clamp(input, min=-1, max=1)
+        # out = torch.sign(input)
+        p = (input >= 0) * (+1.0)
+        n = (input < 0) * (-1.0)
+        out = p + n
+        return out
+    @staticmethod
+    def backward(ctx, grad_output):
+        # mask: to ensure x belongs to (-1, 1)
+        input, = ctx.saved_tensors
+        i2 = input.clone().detach()
+        i3 = torch.clamp(i2, -1, 1)
+        mask = (i3 == i2) + 0.0
+        return grad_output * mask

@@ -1,7 +1,7 @@
 import json
 import os
-from dataclasses import dataclass
-from typing import Any, Callable, Dict
+from dataclasses import dataclass, field, InitVar
+from typing import Any, Callable, Dict, Optional
 
 import numpy as np
 import torch
@@ -12,7 +12,8 @@ from torch.nn import Module
 from gsplat.compression.outlier_filter import filter_splats
 from gsplat.compression.sort import sort_splats
 from gsplat.utils import inverse_log_transform, log_transform
-
+from gsplat.compression_simulation.ops import STE_binary
+from gsplat.compression_simulation.entropy_model import Entropy_gaussian
 
 
 
@@ -47,32 +48,66 @@ class EntropyCodingCompression:
 
     use_sort: bool = True
     verbose: bool = True
+    n_clusters: int = 32768
+
+    attribute_codec_registry: InitVar[Optional[Dict[str, str]]] = None
+
+    compress_fn_map: Dict[str, Callable] = field(default_factory=lambda: {
+        "means": _compress_png_16bit,
+        "scales": _compress_factorized_ans,
+        "quats": _compress_factorized_ans,
+        "opacities": _compress_png,
+        "sh0": _compress_png,
+        "shN": _compress_masked_kmeans,
+    })
+    decompress_fn_map: Dict[str, Callable] = field(default_factory=lambda: {
+        "means": _decompress_png_16bit,
+        "scales": _decompress_factorized_ans,
+        "quats": _decompress_factorized_ans,
+        "opacities": _decompress_png,
+        "sh0": _decompress_png,
+        "shN": _decompress_masked_kmeans,
+    })
+
+    def __post_init__(self, attribute_codec_registry):
+        if attribute_codec_registry:
+            available_functions = {
+                "_compress_png_16bit": _compress_png_16bit,
+                "_compress_png": _compress_png,
+                "_compress_factorized_ans": _compress_factorized_ans,
+                "_compress_gaussian_ans": _compress_gaussian_ans,
+                "_compress_masked_kmeans": _compress_masked_kmeans,
+
+                "_decompress_png_16bit": _decompress_png_16bit,
+                "_decompress_png": _decompress_png,
+                "_decompress_factorized_ans": _decompress_factorized_ans,
+                "_decompress_gaussian_ans": _decompress_gaussian_ans,
+                "_decompress_masked_kmeans": _decompress_masked_kmeans,
+            }
+
+            for attr_name, attr_codec in attribute_codec_registry.items(): # go through the registry
+                if attr_name in self.compress_fn_map and "encode" in attr_codec:
+                    if attr_codec["encode"] in available_functions:
+                        self.compress_fn_map[attr_name] = available_functions[attr_codec["encode"]]
+                    else:
+                        print(f"Warning: Unknown func: {attr_codec['encode']}")
+
+                if attr_name in self.decompress_fn_map and "decode" in attr_codec:
+                    if attr_codec["decode"] in available_functions:
+                        self.decompress_fn_map[attr_name] = available_functions[attr_codec["decode"]]
+                    else:
+                        print(f"Warning: Unknown func: {attr_codec['decode']}")
+
 
     def _get_compress_fn(self, param_name: str) -> Callable:
-        compress_fn_map = {
-            "means": _compress_png_16bit,
-            "scales": _compress_factorized_ans,
-            "quats": _compress_factorized_ans,
-            "opacities": _compress_png,
-            "sh0": _compress_png,
-            "shN": _compress_masked_kmeans,
-        }
-        if param_name in compress_fn_map:
-            return compress_fn_map[param_name]
+        if param_name in self.compress_fn_map:
+            return self.compress_fn_map[param_name]
         else:
             return _compress_npz
 
     def _get_decompress_fn(self, param_name: str) -> Callable:
-        decompress_fn_map = {
-            "means": _decompress_png_16bit,
-            "scales": _decompress_factorized_ans,
-            "quats": _decompress_factorized_ans,
-            "opacities": _decompress_png,
-            "sh0": _decompress_png,
-            "shN": _decompress_masked_kmeans,
-        }
-        if param_name in decompress_fn_map:
-            return decompress_fn_map[param_name]
+        if param_name in self.decompress_fn_map:
+            return self.decompress_fn_map[param_name]
         else:
             return _decompress_npz
 
@@ -119,8 +154,9 @@ class EntropyCodingCompression:
             }
             if param_name in entropy_models:
                 kwargs.update({"entropy_model": entropy_models[param_name]})
-                # decoded_means = self.get_decompressed_means(compress_dir)
-                kwargs.update({"decoded_means": inverse_log_transform(splats["means"])})
+                decoded_means = self.get_decompressed_means(compress_dir, meta["means"])
+                # kwargs.update({"decoded_means": inverse_log_transform(splats["means"])}) # means w/o quant
+                kwargs.update({"decoded_means": decoded_means})
 
             meta[param_name] = compress_fn(
                 compress_dir, param_name, splats[param_name], **kwargs
@@ -144,18 +180,22 @@ class EntropyCodingCompression:
         splats = {}
         for param_name, param_meta in meta.items():
             decompress_fn = self._get_decompress_fn(param_name)
-            splats[param_name] = decompress_fn(compress_dir, param_name, param_meta)
+            if decompress_fn == _decompress_gaussian_ans:
+                decoded_means = inverse_log_transform(splats["means"])
+                splats[param_name] = decompress_fn(compress_dir, param_name, param_meta, decoded_means)
+            else:
+                splats[param_name] = decompress_fn(compress_dir, param_name, param_meta)
 
         # Param-specific postprocessing
         splats["means"] = inverse_log_transform(splats["means"])
         return splats
     
-    def get_decompressed_means(self, compress_dir: str) -> Tensor:
-        with open(os.path.join(compress_dir, "meta.json"), "r") as f:
-            meta = json.load(f)
+    def get_decompressed_means(self, compress_dir: str, meta_means: Dict) -> Tensor:
+        # with open(os.path.join(compress_dir, "meta.json"), "r") as f:
+        #     meta = json.load(f)
         
         decompress_fn = self._get_decompress_fn("means")
-        decoded_means = decompress_fn(compress_dir, "means", meta["means"])
+        decoded_means = decompress_fn(compress_dir, "means", meta_means)
 
         decoded_means = inverse_log_transform(decoded_means)
         return decoded_means
@@ -373,8 +413,6 @@ def _decompress_factorized_ans(compress_dir: str, param_name: str, meta: Dict[st
             "Please install constriction with 'pip install constriction' to use ANS"
         )
 
-    if param_name == "sh0":
-        import pdb; pdb.set_trace()
     if not np.all(meta["shape"]):
         params = torch.zeros(meta["shape"], dtype=getattr(torch, meta["dtype"]))
         return meta
@@ -407,6 +445,49 @@ def _decompress_factorized_ans(compress_dir: str, param_name: str, meta: Dict[st
     params = params.to(dtype=getattr(torch, meta["dtype"]))
     return params
 
+def to_bin_stream(signed_sym: torch.Tensor, filename: str):
+    # float to -1/+1
+    # signed_sym = STE_binary.apply(params)
+    # -1/+1 to unsigned sym
+    unsigned_sym = ((signed_sym + 1)//2).int().numpy()
+
+    # compute the length of byte array
+    n_bytes = (len(unsigned_sym) + 7) // 8
+    packed = bytearray(n_bytes)
+
+    # pack bits into binstream
+    for i, bit in enumerate(unsigned_sym):
+        if bit:
+            packed[i // 8] |= (1 << (i % 8))
+    
+    # save file
+    with open(filename, 'wb') as f:
+        f.write(packed)
+
+def save_gaussian_entropy_model(param_name: str, entropy_model: torch.nn.Module, compress_dir: str) -> Dict[str, Any]:
+    # save entropy model (context model) - hash grid
+    # entropy_model -> param_regressor -> hash_grid     -> encoding_xyz & encoding_xy & encoding_xz & encoding_yz -> params
+    #                                  -> mlp_regressor
+
+    # save hash grid
+    encoding_params_dict = {
+        "encoding_xyz": STE_binary.apply(entropy_model.param_regressor.hash_grid.encoding_xyz.params).detach().cpu(), # value: -1/+1
+        "encoding_xy": STE_binary.apply(entropy_model.param_regressor.hash_grid.encoding_xy.params).detach().cpu(),
+        "encoding_xz": STE_binary.apply(entropy_model.param_regressor.hash_grid.encoding_xz.params).detach().cpu(),
+        "encoding_yz": STE_binary.apply(entropy_model.param_regressor.hash_grid.encoding_yz.params).detach().cpu()
+    }
+
+    meta = {}
+    for enc_name, v in encoding_params_dict.items():
+        meta[f"{enc_name}_shape"] = list(v.shape)
+        to_bin_stream(v.view(-1), os.path.join(compress_dir, f"{param_name}_entropy_model_{enc_name}.bin"))
+
+    # save mlp
+    torch.save(entropy_model.param_regressor.mlp_regressor.state_dict(), 
+               os.path.join(compress_dir, f"{param_name}_entropy_model_mlp.ckpt"))
+    
+    return meta
+
 def _compress_gaussian_ans(
     compress_dir: str, param_name: str, params: Tensor, entropy_model: Module, decoded_means: Tensor, **kwargs
 ) -> Dict[str, Any]:
@@ -427,7 +508,10 @@ def _compress_gaussian_ans(
         raise ImportError(
             "Please install constriction with 'pip install constriction' to use ANS"
         )
+    
+    meta = save_gaussian_entropy_model(param_name, entropy_model, compress_dir)
 
+    # quantization
     mins = torch.amin(params, dim=0)
     maxs = torch.amax(params, dim=0)
 
@@ -436,46 +520,138 @@ def _compress_gaussian_ans(
 
     symbols = (params_norm * (2**8 - 1)).round().astype(np.int32)
 
+    # Query to obtain distribution parameters
     entropy_model = entropy_model.to("cuda")
-
     miu, sigma = entropy_model.get_means_and_scales(decoded_means.to("cuda"))
 
-    miu_norm = ((miu - mins) / (maxs - mins) * (2**8 - 1)).detach().cpu().numpy().astype(np.float64)
+    # Since our symbols are obtained via shift & scale transformations from the original parameters,
+    # the probability distributions have changed accordingly. Therefore, the queried distribution parameters
+    # also need to be transformed correspondingly.
+    miu_norm = ((miu - mins) / (maxs - mins) * (2**8 - 1)).detach().cpu().numpy().astype(np.float64)  
     sigma_norm = (sigma / (maxs - mins) * (2**8 - 1)).detach().cpu().numpy().astype(np.float64)
 
-    # TODO: compress embedding
+    ### save intermediate variables for debug
+    # tensor_to_be_saved = {
+    #     "decoded_means": decoded_means,
+    #     "miu": miu.detach().cpu(),
+    #     "sigma": sigma.detach().cpu(),
+    #     "mins": mins.detach().cpu(),
+    #     "maxs": maxs.detach().cpu(),
+    # }
+    # torch.save(tensor_to_be_saved, os.path.join(compress_dir, f"{param_name}_debug.ckpt"))
 
-    # ANS
+    # flatten  into sequence
     message, means, stds = symbols.ravel(), miu_norm.ravel(), sigma_norm.ravel()
 
+    # setup entropy coder
     model_family = constriction.stream.model.QuantizedGaussian(0, 255)
     encoder = constriction.stream.stack.AnsCoder()
     encoder.encode_reverse(message, model_family, means, stds)
 
-    # Get and print the compressed representation:
+    # compress symbols into binstream and save the binstream
     compressed = encoder.get_compressed()
     compressed.tofile(os.path.join(compress_dir, f"{param_name}.bin"))
-    compressed = np.fromfile(os.path.join(compress_dir, f"{param_name}.bin"), dtype=np.uint32)
 
     # Decode the message:
+    compressed = np.fromfile(os.path.join(compress_dir, f"{param_name}.bin"), dtype=np.uint32)
     decoder = constriction.stream.stack.AnsCoder(compressed) # (we could also just reuse `encoder`.)
     reconstructed = decoder.decode(model_family, means, stds)
-    # print(f"Reconstructed message: {reconstructed}")
+
     assert np.all(reconstructed == message)
 
-    meta = {
+    meta.update({
         "shape": list(params.shape),
         "dtype": str(params.dtype).split(".")[1],
         "mins": mins.tolist(),
         "maxs": maxs.tolist(),
-    }
+    })
     return meta
 
-def _decompress_gaussian_ans(
-    compress_dir: str, param_name: str, meta: Dict[str, Any]
-) -> Tensor:
+def from_bin_stream(filename: str, tensor_length: int) -> torch.Tensor:
+    # read binary file
+    with open(filename, 'rb') as f:
+        byte_data = f.read()
     
-    pass
+    # set up tensor to be saved
+    unsigned_sym = torch.zeros(tensor_length, dtype=torch.int)
+    
+    # unpack byte array
+    for i in range(tensor_length):
+        byte_index = i // 8
+        bit_position = i % 8
+        
+        # Check if specific bit is 1
+        if byte_index < len(byte_data) and (byte_data[byte_index] & (1 << bit_position)):
+            unsigned_sym[i] = 1
+    
+    # Convert 0/1 to -1/+1
+    signed_sym = unsigned_sym * 2 - 1
+    signed_sym = signed_sym.to(dtype=torch.float32)
+    
+    return signed_sym
+
+def _decompress_gaussian_ans(
+    compress_dir: str, param_name: str, meta: Dict[str, Any], decoded_means: Tensor,
+) -> Tensor:
+    try:
+        import constriction
+    except:
+        raise ImportError(
+            "Please install constriction with 'pip install constriction' to use ANS"
+        )
+    # load entropy model
+    entropy_model = Entropy_gaussian(channel=meta["shape"][-1])
+
+    # load mlp of entropy model
+    entropy_model.param_regressor.mlp_regressor.load_state_dict(torch.load(os.path.join(compress_dir, f"{param_name}_entropy_model_mlp.ckpt")))
+
+    # load embedings of entropy model
+    for k, v in meta.items():
+        if "encoding" in k:
+            enc_name = k[:-6]
+            tensor_length = np.prod(v)
+            decoded_encoding = from_bin_stream(os.path.join(compress_dir, f"{param_name}_entropy_model_{enc_name}.bin"), tensor_length)
+            decoded_encoding = decoded_encoding.reshape(meta[f"{k}"])
+
+            encoding_instance = getattr(entropy_model.param_regressor.hash_grid, enc_name)
+            encoding_instance.params.data = decoded_encoding
+
+    # 
+    entropy_model = entropy_model.to("cuda")
+    miu, sigma = entropy_model.get_means_and_scales(decoded_means.to("cuda"))
+
+    mins = torch.tensor(meta["mins"]).to("cuda")
+    maxs = torch.tensor(meta["maxs"]).to("cuda")
+    miu_norm = ((miu - mins) / (maxs - mins) * (2**8 - 1)).detach().cpu().numpy().astype(np.float64)
+    sigma_norm = (sigma / (maxs - mins) * (2**8 - 1)).detach().cpu().numpy().astype(np.float64)
+
+    # flatten into sequence
+    means, stds = miu_norm.ravel(), sigma_norm.ravel()
+
+    ### load intermediate variables in encoding side to check if encoding and decoding match
+    # debug_dict = torch.load(os.path.join(compress_dir, f"{param_name}_debug.ckpt"))
+
+    # load .bin file of compressed symbols
+    compressed = np.fromfile(os.path.join(compress_dir, f"{param_name}.bin"), dtype=np.uint32)
+    
+    # instantiate entropy coder
+    decoder = constriction.stream.stack.AnsCoder(compressed)
+    model_family = constriction.stream.model.QuantizedGaussian(0, 255)
+
+    # decoding
+    reconstructed = decoder.decode(model_family, means, stds)
+
+    # recover the tensor
+    params_norm = reconstructed / (2**8 - 1)
+    params_norm = torch.tensor(params_norm).reshape(meta["shape"])
+    params_norm = params_norm.to(dtype=getattr(torch, meta["dtype"]))
+
+    mins = torch.tensor(meta["mins"])
+    maxs = torch.tensor(meta["maxs"])
+
+    params = params_norm * (maxs - mins) + mins
+
+    return params
 
 def _compress_png_kbit(
     compress_dir: str, param_name: str, params: Tensor, n_sidelen: int, quantization: int = 8, **kwargs

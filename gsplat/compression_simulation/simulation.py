@@ -696,17 +696,11 @@ class STGCompressionSimulation:
 
         # entropy constraint
         if step > self.entropy_steps["scales"] and self.entropy_model_enable and self.entropy_model_option["scales"]:
-            # import pdb; pdb.set_trace()
-            # factorized model
+            
             if choose_idx is not None:
                 esti_bits = self.entropy_models["scales"](fq_out_dict["output_value"][choose_idx], fq_out_dict["q_step"])
             else:
                 esti_bits = self.entropy_models["scales"](fq_out_dict["output_value"], fq_out_dict["q_step"])
-
-            # gaussian model
-            # mean = torch.mean(fq_out_dict["output_value"][choose_idx])
-            # std = torch.std(fq_out_dict["output_value"][choose_idx])
-            # esti_bits = self.entropy_models["scales"](fq_out_dict["output_value"][choose_idx], mean, std, fq_out_dict["q_step"])
 
             return fq_out_dict["output_value"], esti_bits
         else:
