@@ -1187,12 +1187,14 @@ class Runner:
 
                 # eval the full set
                 if step in [i - 1 for i in cfg.eval_steps]:
+                    self.run_param_distribution_vis(self.comp_sim_splats, 
+                                                    f"{cfg.result_dir}/visualization/comp_sim_step{step}")
                     self.eval(step)
                     self.render_traj(step)
 
                 # run compression
-                if cfg.compression is not None and step in [i - 1 for i in cfg.eval_steps]:
-                    self.run_compression(step=step)
+                # if cfg.compression is not None and step in [i - 1 for i in cfg.eval_steps]:
+                #     self.run_compression(step=step)
 
                 if not cfg.disable_viewer:
                     self.viewer.lock.release()
@@ -1399,32 +1401,56 @@ class Runner:
     @torch.no_grad()
     def run_param_distribution_vis(self, param_dict: Dict[str, Tensor], save_dir: str):
         import matplotlib.pyplot as plt
+        import matplotlib.ticker as ticker
+        from matplotlib.colors import LinearSegmentedColormap
+
+        def plot_distribution(value, param_name, save_dir):
+            tensor_np = value.flatten().detach().cpu().numpy()
+            min_val, max_val = tensor_np.min(), tensor_np.max()
+            
+            nice_blue = '#4878CF'  # Brighter blue
+            
+            plt.figure(figsize=(6, 4.5), dpi=100)
+            
+            # Use more bins for a smoother histogram
+            n, bins, patches = plt.hist(tensor_np, bins=50, density=False, alpha=0.85, 
+                                    color=nice_blue, edgecolor='none')
+            
+            # Add grid lines but place them behind the chart
+            plt.grid(alpha=0.3, linestyle='--', axis='y')
+            plt.gca().set_axisbelow(True)
+            
+            # Use scientific notation for y-axis ticks
+            plt.gca().yaxis.set_major_formatter(ticker.ScalarFormatter(useMathText=True))
+            plt.gca().ticklabel_format(style='sci', axis='y', scilimits=(0,0))
+            
+            # Improved annotations for minimum and maximum values, smaller size
+            plt.annotate(f'Min: {min_val:.2f}', xy=(min_val, 0), xytext=(min_val, max(n) * 0.1),
+                        arrowprops=dict(facecolor='green', width=1.5, headwidth=6, headlength=6, shrink=0.05), 
+                        fontsize=8, color='darkgreen', weight='bold',
+                        bbox=dict(boxstyle="round,pad=0.1", fc="white", ec="green", alpha=0.7))
+
+            plt.annotate(f'Max: {max_val:.2f}', xy=(max_val, 0), xytext=(max_val, max(n) * 0.1),
+                        arrowprops=dict(facecolor='red', width=1.5, headwidth=6, headlength=6, shrink=0.05), 
+                        fontsize=8, color='darkred', weight='bold',
+                        bbox=dict(boxstyle="round,pad=0.1", fc="white", ec="red", alpha=0.7))
+            
+            # Beautify title and labels
+            plt.title(f'{param_name} Distribution')
+            plt.xlabel('Value')
+            plt.ylabel('Frequency')
+            
+            # Adjust x and y axis ranges to leave enough space for annotations
+            plt.xlim(min_val - (max_val - min_val) * 0.05, max_val + (max_val - min_val) * 0.05)
+            plt.ylim(0, max(n) * 1.2)
+            
+            plt.tight_layout()
+            plt.savefig(os.path.join(save_dir, f'{param_name}.png'), dpi=120, bbox_inches='tight')
+            plt.close()
 
         os.makedirs(save_dir, exist_ok=True)
         for param_name, value in param_dict.items():
-            
-            tensor_np = value.flatten().detach().cpu().numpy()
-            min_val, max_val = tensor_np.min(), tensor_np.max()
-
-            plt.figure(figsize=(6, 4))
-            n, bins, patches = plt.hist(tensor_np, bins=50, density=False, alpha=0.7, color='b')
-
-            for count, bin_edge in zip(n, bins):
-                plt.text(bin_edge, count, f'{int(count)}', fontsize=8, va='bottom', ha='center')
-
-            plt.annotate(f'Min: {min_val:.2f}', xy=(min_val, 0), xytext=(min_val, max(n) * 0.1),
-                        arrowprops=dict(facecolor='green', shrink=0.05), fontsize=10, color='green')
-
-            plt.annotate(f'Max: {max_val:.2f}', xy=(max_val, 0), xytext=(max_val, max(n) * 0.1),
-                        arrowprops=dict(facecolor='red', shrink=0.05), fontsize=10, color='red')
-
-            plt.title(f'{param_name} Distribution')
-            plt.xlabel('Value')
-            plt.ylabel('Density')
-
-            plt.savefig(os.path.join(save_dir, f'{param_name}.png'))
-
-            plt.close()
+            plot_distribution(value, param_name, save_dir)
         
         print(f"Histograms saved in '{save_dir}' directory.")
     
