@@ -6,7 +6,7 @@ import shutil
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple, Union, ContextManager, TypedDict
+from typing import Dict, List, Optional, Tuple, Union, ContextManager, TypedDict, Any
 
 import imageio
 import nerfview
@@ -83,15 +83,59 @@ class ProfilerConfig:
                 setattr(self, key, value)
         self.schedule = self._create_schedule()
 
-class CompressionConfig(TypedDict, total=False):
+@dataclass
+class CodecConfig:
+    encode: str
+    decode: str
+
+@dataclass
+class AttributeCodecs:
+    means: CodecConfig = field(default_factory=lambda: CodecConfig("_compress_png_16bit", "_decompress_png_16bit"))
+    scales: CodecConfig = field(default_factory=lambda: CodecConfig("_compress_factorized_ans", "_decompress_factorized_ans"))
+    quats: CodecConfig = field(default_factory=lambda: CodecConfig("_compress_factorized_ans", "_decompress_factorized_ans"))
+    opacities: CodecConfig = field(default_factory=lambda: CodecConfig("_compress_png", "_decompress_png"))
+    sh0: CodecConfig = field(default_factory=lambda: CodecConfig("_compress_png", "_decompress_png"))
+    shN: CodecConfig = field(default_factory=lambda: CodecConfig("_compress_masked_kmeans", "_decompress_masked_kmeans"))
+    
+    def to_dict(self) -> Dict[str, Dict[str, str]]:
+        return {
+            attr: {"encode": getattr(self, attr).encode, "decode": getattr(self, attr).decode}
+            for attr in ["means", "scales", "quats", "opacities", "sh0", "shN"]
+        }
+
+@dataclass
+class CompressionConfig:
     # Use PLAS sort in compression or not
-    use_sort: Optional[bool] = field(default=None)
+    use_sort: bool = True
     # Verbose or not
-    verbose: Optional[bool] = field(default=None) 
+    verbose: bool = True
     # QP value for video coding
-    qp: int = 4
+    qp: Optional[int] = field(default=None)
     # Number of cluster of VQ for shN compression
     n_clusters: int = 32768
+    # Maps attribute names to their codec functions
+    attribute_codec_registry: Optional[AttributeCodecs] = field(default_factory=lambda: AttributeCodecs())
+
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Convert the CompressionConfig instance to a dictionary.
+        If attribute_codec_registry is not None, it will be converted to a dictionary using its to_dict method.
+        Fields with None values (use_sort, verbose) will be excluded from the resulting dictionary.
+        """
+        result = {
+            "use_sort": self.use_sort,
+            "verbose": self.verbose,
+            "n_clusters": self.n_clusters,
+        }
+            
+        if self.qp is not None:
+            result["qp"] = self.qp
+        
+        # handle attribute_codec_registry
+        if self.attribute_codec_registry is not None:
+            result["attribute_codec_registry"] = self.attribute_codec_registry.to_dict()
+        
+        return result
 
 @dataclass
 class Config:
@@ -565,9 +609,11 @@ class Runner:
             if cfg.compression == "png":
                 self.compression_method = PngCompression()
             elif  cfg.compression == "entropy_coding":
-                self.compression_method = EntropyCodingCompression()
+                compression_cfg = cfg.compression_cfg.to_dict()
+                self.compression_method = EntropyCodingCompression(**compression_cfg)
             elif cfg.compression == "hevc":
-                self.compression_method = HevcCompression(**cfg.compression_cfg) # compression_cfg=cfg.compression_cfg
+                compression_cfg = cfg.compression_cfg.to_dict()
+                self.compression_method = HevcCompression(**compression_cfg) 
             else:
                 raise ValueError(f"Unknown compression strategy: {cfg.compression}")
         

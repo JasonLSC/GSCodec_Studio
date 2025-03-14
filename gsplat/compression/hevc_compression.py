@@ -1,8 +1,8 @@
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field, InitVar
 import shutil
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Optional
 
 import numpy as np
 import torch
@@ -46,36 +46,55 @@ class HevcCompression:
 
     use_sort: bool = True
     verbose: bool = True
-    qp: int = 4
     n_clusters: int = 32768
+    qp: int = 4
+
+    attribute_codec_registry: InitVar[Optional[Dict[str, str]]] = None
+
+    compress_fn_map: Dict[str, Callable] = field(default_factory=lambda: {
+        "means": _compress_png_16bit,
+        "scales": _compress_hevc_kbit,
+        "quats": _compress_quats_hevc_kbit,
+        "opacities": _compress_hevc_kbit,
+        "sh0": _compress_hevc_kbit,
+        "shN": _compress_masked_kmeans,
+    })
+    decompress_fn_map: Dict[str, Callable] = field(default_factory=lambda: {
+        "means": _decompress_png_16bit,
+        "scales": _decompress_hevc_kbit,
+        "quats": _decompress_quats_hevc_kbit,
+        "opacities": _decompress_hevc_kbit,
+        "sh0": _decompress_hevc_kbit,
+        "shN": _decompress_masked_kmeans,
+    })
 
     def _get_compress_fn(self, param_name: str) -> Callable:
-        compress_fn_map = {
-            "means": _compress_png_16bit,
-            "scales": _compress_hevc_kbit,
-            "quats": _compress_quats_hevc_kbit,
-            "opacities": _compress_hevc_kbit,
-            "sh0": _compress_hevc_kbit,
-            # "shN": _compress_kmeans,
-            "shN": _compress_masked_kmeans,
-        }
-        if param_name in compress_fn_map:
-            return compress_fn_map[param_name]
+        # compress_fn_map = {
+        #     "means": _compress_png_16bit,
+        #     "scales": _compress_hevc_kbit,
+        #     "quats": _compress_quats_hevc_kbit,
+        #     "opacities": _compress_hevc_kbit,
+        #     "sh0": _compress_hevc_kbit,
+        #     # "shN": _compress_kmeans,
+        #     "shN": _compress_masked_kmeans,
+        # }
+        if param_name in self.compress_fn_map:
+            return self.compress_fn_map[param_name]
         else:
             return _compress_npz
 
     def _get_decompress_fn(self, param_name: str) -> Callable:
-        decompress_fn_map = {
-            "means": _decompress_png_16bit,
-            "scales": _decompress_hevc_kbit,
-            "quats": _decompress_quats_hevc_kbit,
-            "opacities": _decompress_hevc_kbit,
-            "sh0": _decompress_hevc_kbit,
-            # "shN": _decompress_kmeans,
-            "shN": _decompress_masked_kmeans,
-        }
-        if param_name in decompress_fn_map:
-            return decompress_fn_map[param_name]
+        # decompress_fn_map = {
+        #     "means": _decompress_png_16bit,
+        #     "scales": _decompress_hevc_kbit,
+        #     "quats": _decompress_quats_hevc_kbit,
+        #     "opacities": _decompress_hevc_kbit,
+        #     "sh0": _decompress_hevc_kbit,
+        #     # "shN": _decompress_kmeans,
+        #     "shN": _decompress_masked_kmeans,
+        # }
+        if param_name in self.decompress_fn_map:
+            return self.decompress_fn_map[param_name]
         else:
             return _decompress_npz
 
