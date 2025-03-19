@@ -354,10 +354,10 @@ class Runner:
     def load_ply_sequences(
         self, ply_dir: str, frame_num: int
     ) -> List[torch.nn.ParameterDict]:
-        filename_list = sorted(glob.glob(os.path.join(ply_dir, "*.ply")))
+        self.filename_list = sorted(glob.glob(os.path.join(ply_dir, "*.ply")))
 
         splats_list = []
-        for filename in tqdm.tqdm(filename_list[:frame_num], desc="Loading .ply file"):
+        for filename in tqdm.tqdm(self.filename_list[:frame_num], desc="Loading .ply file"):
             splats = load_ply(filename)
             splats_list.append(splats.to("cuda"))
         
@@ -633,13 +633,24 @@ class Runner:
         with open(os.path.join(self.cfg.result_dir, "summary.json"), "w") as fp:
             json.dump(rd_summary, fp, indent=4)
 
+    def stack_render_img_to_vid(self):
+        for stage in ["compress", "val"]:
+            for test_view_id in range(len(self.cfg.test_view_id)):
+                cmd = (f'ffmpeg -framerate 30 -i "{self.cfg.result_dir}/renders/{stage}_frame%03d_testv{test_view_id:03d}.png" '
+                    f'-c:v libx264 -pix_fmt yuv420p -crf 20 -preset medium '
+                    f'-profile:v high -level 4.1 -movflags +faststart "{self.cfg.result_dir}/renders/{stage}_testv{test_view_id:03d}.mp4"')
+                
+                print(f"Running: {cmd}")
+                os.system(cmd)
+                print(f"Video created for {stage}, test view {test_view_id}")
 
 def main(local_rank: int, world_rank, world_size: int, cfg: Config):
     runner = Runner(local_rank, world_rank, world_size, cfg)
 
-    # runner.eval()
-    # runner.compress()
+    runner.eval()
+    runner.compress()
     runner.summary()
+    runner.stack_render_img_to_vid()
     
 
 if __name__ == "__main__":
@@ -653,7 +664,7 @@ if __name__ == "__main__":
                                                   n_clusters=8192)
             )
         ),
-        "x265_compression_qp0": (
+        "x265_compression_rp0": (
             "Use HevcCompression.",
             Config(
                 compression="seq_hevc",
@@ -673,7 +684,7 @@ if __name__ == "__main__":
                 )
             )
         ),
-        "x265_compression_qp1": (
+        "x265_compression_rp1": (
             "Use HevcCompression.",
             Config(
                 compression="seq_hevc",
@@ -681,9 +692,9 @@ if __name__ == "__main__":
                     qp={
                         "means": -1,
                         "opacities": 4,
-                        "quats": 4,
-                        "scales": 4,
-                        "sh0": 10,
+                        "quats": 10,
+                        "scales": 10,
+                        "sh0": 4,
                         "shN": {
                             "sh1": 16,
                             "sh2": 22,
@@ -693,7 +704,7 @@ if __name__ == "__main__":
                 )
             )
         ),
-        "x265_compression_qp2": (
+        "x265_compression_rp2": (
             "Use HevcCompression.",
             Config(
                 compression="seq_hevc",
@@ -701,9 +712,9 @@ if __name__ == "__main__":
                     qp={
                         "means": -1,
                         "opacities": 10,
-                        "quats": 10,
-                        "scales": 10,
-                        "sh0": 16,
+                        "quats": 16,
+                        "scales": 16,
+                        "sh0": 10,
                         "shN": {
                             "sh1": 22,
                             "sh2": 28,
@@ -713,7 +724,7 @@ if __name__ == "__main__":
                 )
             )
         ),
-        "x265_compression_qp3": (
+        "x265_compression_rp3": (
             "Use HevcCompression.",
             Config(
                 compression="seq_hevc",
@@ -721,9 +732,9 @@ if __name__ == "__main__":
                     qp={
                         "means": -1,
                         "opacities": 16,
-                        "quats": 16,
-                        "scales": 16,
-                        "sh0": 22,
+                        "quats": 22,
+                        "scales": 22,
+                        "sh0": 16,
                         "shN": {
                             "sh1": 28,
                             "sh2": 34,
