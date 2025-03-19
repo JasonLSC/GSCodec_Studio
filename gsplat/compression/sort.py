@@ -4,7 +4,12 @@ import torch
 from torch import Tensor
 
 
-def sort_splats(splats: Dict[str, Tensor], verbose: bool = True) -> Dict[str, Tensor]:
+def sort_splats(
+        splats: Dict[str, Tensor], 
+        verbose: bool = True, 
+        return_indices: bool = False,
+        sort_with_shN: bool = False
+        ) -> Dict[str, Tensor]:
     """Sort splats with Parallel Linear Assignment Sorting from the paper `Compact 3D Scene Representation via
     Self-Organizing Gaussian Grids <https://arxiv.org/pdf/2312.13299>`_.
 
@@ -14,6 +19,8 @@ def sort_splats(splats: Dict[str, Tensor], verbose: bool = True) -> Dict[str, Te
     Args:
         splats (Dict[str, Tensor]): splats
         verbose (bool, optional): Whether to print verbose information. Default to True.
+        return_indices (bool, optional): Whether to return sorted indices. Default to False.
+        sort_with_shN (bool, optional): Whether to consider shN when sorting. Default to False.
 
     Returns:
         Dict[str, Tensor]: sorted splats
@@ -29,7 +36,10 @@ def sort_splats(splats: Dict[str, Tensor], verbose: bool = True) -> Dict[str, Te
     n_sidelen = int(n_gs**0.5)
     assert n_sidelen**2 == n_gs, "Must be a perfect square"
 
-    sort_keys = [k for k in splats if k != "shN"]
+    if not sort_with_shN:
+        sort_keys = [k for k in splats if k != "shN"]
+    else:
+        sort_keys = [k for k in splats]
     params_to_sort = torch.cat([splats[k].reshape(n_gs, -1) for k in sort_keys], dim=-1)
     shuffled_indices = torch.randperm(
         params_to_sort.shape[0], device=params_to_sort.device
@@ -43,4 +53,8 @@ def sort_splats(splats: Dict[str, Tensor], verbose: bool = True) -> Dict[str, Te
     sorted_indices = shuffled_indices[sorted_indices]
     for k, v in splats.items():
         splats[k] = v[sorted_indices]
-    return splats
+    
+    if return_indices:
+        return splats, sorted_indices
+    else:
+        return splats
