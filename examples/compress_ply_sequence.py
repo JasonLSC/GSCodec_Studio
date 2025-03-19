@@ -568,14 +568,9 @@ class Runner:
         # save metrics
         with open(f"{self.stats_dir}/{stage}.json", "w") as f:
             json.dump(seq_stats, f, indent=4)        
-    
-    def analyze_compression(self, result_dir):
-        """Analyze file sizes in compression directory and create visualization with pie chart and table"""
-        import os
-        import matplotlib.pyplot as plt
-        import pandas as pd
-        import numpy as np
 
+    def summary(self,):
+        import pandas as pd
         def format_size(size_bytes):
             """Convert byte size to readable format (KB, MB, GB, etc.)"""
             if size_bytes < 1024:
@@ -586,8 +581,9 @@ class Runner:
                 return f"{size_bytes/(1024**2):.2f} MB"
             else:
                 return f"{size_bytes/(1024**3):.2f} GB"
-
-        directory_path = os.path.join(result_dir, "compression", "rank0")
+            
+        # rate summary
+        directory_path = os.path.join(self.cfg.result_dir, "compression", "rank0")
         
         # Check if directory exists
         if not os.path.exists(directory_path):
@@ -605,15 +601,14 @@ class Runner:
                 size = os.path.getsize(item_path)
                 file_sizes[item] = size
                 total_size += size
-        
-        # Check if there are files
-        if not file_sizes:
-            print(f"Error: No files found in '{directory_path}'")
-            return
-        
-        # Calculate percentages
+
+        # Get bitrate
+        Byte_to_Mbps = lambda filesize, n_frame: filesize / (1024 ** 2) / n_frame * 8 * 30
+        bitrate = Byte_to_Mbps(total_size, self.frame_num)
+
+        # Calculate percentage
         percentages = {name: (size / total_size) * 100 for name, size in file_sizes.items()}
-        
+    
         # Create table data
         table_data = []
         for name, size in sorted(file_sizes.items(), key=lambda x: x[1], reverse=True):
@@ -623,149 +618,28 @@ class Runner:
         
         # Create pandas DataFrame for table
         df = pd.DataFrame(table_data, columns=["Filename", "Size", "Percentage"])
+        csv_path = os.path.join(self.cfg.result_dir, "stats", "memory_breakdown.csv")
+        df.to_csv(csv_path, index=False)
+        print(f"CSV file saved to: {csv_path}")
+
+        # distortion summary
+        with open(os.path.join(self.cfg.result_dir, "stats", "compress.json"), "r") as fp:
+            quality_metrics = json.load(fp)
+            avg_quality_metrics = quality_metrics["average"]
         
-        try:
-            # Create visualization
-            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 10))
-            fig.suptitle(f"Directory: {os.path.basename(directory_path)} Total Size: {format_size(total_size)}", fontsize=16)
-            
-            # Separate large and small files for better visualization
-            # Files with less than 2% contribution will be grouped as "Other"
-            threshold = 2.0  # percentage threshold
-            
-            large_files = {name: size for name, size in file_sizes.items() 
-                        if (size / total_size) * 100 >= threshold}
-            small_files = {name: size for name, size in file_sizes.items() 
-                        if (size / total_size) * 100 < threshold}
-            
-            # If we have small files, group them
-            if small_files:
-                large_files_with_other = large_files.copy()
-                large_files_with_other["Other (small files)"] = sum(small_files.values())
-                
-                # Prepare pie chart data
-                labels = list(large_files_with_other.keys())
-                sizes = list(large_files_with_other.values())
-                
-                # Generate distinct colors
-                colors = plt.cm.tab20(np.linspace(0, 1, len(labels)))
-                
-                # Create pie chart with only large files + "Other"
-                wedges, texts, autotexts = ax1.pie(
-                    sizes, 
-                    labels=None,
-                    autopct='%1.1f%%', 
-                    shadow=False, 
-                    startangle=90,
-                    colors=colors,
-                    wedgeprops={'edgecolor': 'w', 'linewidth': 1}
-                )
-                
-                # Improve autopct text legibility
-                for autotext in autotexts:
-                    autotext.set_fontsize(9)
-                    autotext.set_weight('bold')
-                    
-                # Create a cleaner legend
-                ax1.legend(
-                    wedges, 
-                    labels, 
-                    title="Files", 
-                    loc="center left", 
-                    bbox_to_anchor=(1, 0.5),
-                    fontsize=9
-                )
-                
-            else:
-                # If all files are significant, show them all
-                labels = list(file_sizes.keys())
-                sizes = list(file_sizes.values())
-                
-                colors = plt.cm.tab20(np.linspace(0, 1, len(labels)))
-                
-                wedges, texts, autotexts = ax1.pie(
-                    sizes, 
-                    labels=None, 
-                    autopct='%1.1f%%', 
-                    shadow=False, 
-                    startangle=90,
-                    colors=colors,
-                    wedgeprops={'edgecolor': 'w', 'linewidth': 1}
-                )
-                
-                for autotext in autotexts:
-                    autotext.set_fontsize(9)
-                    autotext.set_weight('bold')
-                    
-                ax1.legend(
-                    wedges, 
-                    labels, 
-                    title="Files", 
-                    loc="center left", 
-                    bbox_to_anchor=(1, 0.5),
-                    fontsize=9
-                )
-            
-            ax1.axis('equal')  # Equal aspect ratio ensures pie is circular
-            ax1.set_title('File Size Distribution', pad=20)
-            
-            # Create table with all files (not just the ones in the pie chart)
-            ax2.axis('off')  # Hide axis
-            
-            # Make sure df has values
-            if not df.empty:
-                # Limit table to top 25 rows if more than that
-                df_display = df.head(25) if len(df) > 25 else df
-                
-                table = ax2.table(
-                    cellText=df_display.values,
-                    colLabels=df_display.columns,
-                    cellLoc='center',
-                    loc='center',
-                    bbox=[0.05, 0.05, 0.9, 0.9]
-                )
-                
-                # Adjust table style
-                table.auto_set_font_size(False)
-                table.set_fontsize(9)
-                table.scale(1, 1.5)
-                
-                # Color the header row
-                for j, cell in enumerate(table.get_celld()[(0, j)] for j in range(df_display.shape[1])):
-                    cell.set_facecolor('#4472C4')
-                    cell.set_text_props(color='white', fontsize=10, weight='bold')
-                
-                # Add note if not all files are shown
-                if len(df) > 25:
-                    ax2.text(0.5, 0.02, f"Note: Showing top 25 of {len(df)} files", 
-                            horizontalalignment='center', fontsize=8, fontstyle='italic')
-                
-                # Set table title
-                ax2.set_title('File Size Details', pad=20)
-            else:
-                ax2.text(0.5, 0.5, "No file data to display", 
-                        horizontalalignment='center', verticalalignment='center')
-            
-            plt.tight_layout()
-            plt.subplots_adjust(top=0.9)
-            
-            # Create output directory if it doesn't exist
-            output_file = os.path.join(result_dir, "storage_analysis.png")
-            os.makedirs(os.path.dirname(output_file), exist_ok=True)
-            
-            plt.savefig(output_file, dpi=300, bbox_inches="tight")
-            print(f"Storage analysis saved to {output_file}")
-            plt.close(fig)  # Close the figure to free memory
-            
-        except Exception as e:
-            print(f"Error creating visualization: {str(e)}")
+        # save summary into a json file
+        rd_summary = {key: value for key, value in avg_quality_metrics.items() if key != "ellipse_time"}
+        rd_summary["bitrate"] = bitrate
+        with open(os.path.join(self.cfg.result_dir, "summary.json"), "w") as fp:
+            json.dump(rd_summary, fp, indent=4)
+
 
 def main(local_rank: int, world_rank, world_size: int, cfg: Config):
     runner = Runner(local_rank, world_rank, world_size, cfg)
 
-    runner.eval()
-    runner.compress()
-    runner.analyze_compression(os.path.join(cfg.result_dir))
+    # runner.eval()
+    # runner.compress()
+    runner.summary()
     
 
 if __name__ == "__main__":
