@@ -7,6 +7,7 @@ from torch import Tensor
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from matplotlib import colormaps
+from plyfile import PlyData
 
 
 class CameraOptModule(torch.nn.Module):
@@ -222,3 +223,65 @@ def apply_depth_colormap(
     if acc is not None:
         img = img * acc + (1.0 - acc)
     return img
+
+
+def load_ply(path: str) -> torch.nn.ParameterDict:
+    # Read PLY file
+    plydata = PlyData.read(path)
+    vertices = plydata['vertex']
+    
+    # Get total number of vertices
+    n_vertices = vertices.count
+
+    # Extract basic attributes (positions)
+    means = np.stack((vertices['x'], vertices['y'], vertices['z']), axis=1)
+    
+    # Calculate dimensions for sh0 and shN
+    sh0_size = len([prop for prop in vertices.properties if prop.name.startswith('f_dc_')])
+    shN_size = len([prop for prop in vertices.properties if prop.name.startswith('f_rest_')])
+    
+    # Extract sh0 data
+    sh0_data = np.zeros((n_vertices, sh0_size))
+    for i in range(sh0_size):
+        sh0_data[:, i] = vertices[f'f_dc_{i}']
+    
+    # Extract shN data
+    shN_data = np.zeros((n_vertices, shN_size))
+    for i in range(shN_size):
+        shN_data[:, i] = vertices[f'f_rest_{i}']
+    
+    # Extract opacity data
+    opacities = vertices['opacity'].reshape(-1, 1)
+    
+    # Extract scales data
+    scale_size = len([prop for prop in vertices.properties if prop.name.startswith('scale_')])
+    scales = np.zeros((n_vertices, scale_size))
+    for i in range(scale_size):
+        scales[:, i] = vertices[f'scale_{i}']
+    
+    # Extract quaternion data
+    quat_size = len([prop for prop in vertices.properties if prop.name.startswith('rot_')])
+    quats = np.zeros((n_vertices, quat_size))
+    for i in range(quat_size):
+        quats[:, i] = vertices[f'rot_{i}']
+    
+    # Reshape sh0 and shN to original dimensions
+    sh0_dim2 = 3  # Assume 3, adjust based on actual data
+    sh0_dim1 = sh0_size // sh0_dim2
+    shN_dim2 = 3  # Assume 3, adjust based on actual data
+    shN_dim1 = shN_size // shN_dim2
+    
+    sh0_data = sh0_data.reshape(-1, sh0_dim2, sh0_dim1).transpose(0, 2, 1)
+    shN_data = shN_data.reshape(-1, shN_dim2, shN_dim1).transpose(0, 2, 1)
+    
+    # Convert to torch tensors and create ParameterDict
+    splats = torch.nn.ParameterDict({
+        "means": torch.nn.Parameter(torch.from_numpy(means.astype(np.float32))),
+        "sh0": torch.nn.Parameter(torch.from_numpy(sh0_data.astype(np.float32))),
+        "shN": torch.nn.Parameter(torch.from_numpy(shN_data.astype(np.float32))),
+        "opacities": torch.nn.Parameter(torch.from_numpy(opacities.astype(np.float32)).squeeze(1)),
+        "scales": torch.nn.Parameter(torch.from_numpy(scales.astype(np.float32))),
+        "quats": torch.nn.Parameter(torch.from_numpy(quats.astype(np.float32)))
+    })
+    
+    return splats
