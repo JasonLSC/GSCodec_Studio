@@ -3,6 +3,9 @@ import shutil
 import numpy as np
 from pathlib import Path
 from tqdm import trange
+import tyro
+from dataclasses import dataclass
+from typing import Optional
 
 from scene_info import DATASET_INFOS
 from mpeg_gsc_utils.pre_colmap import COLMAPDatabase
@@ -205,18 +208,42 @@ def getcolmapsinglen3d(folder, offset):
         destination_file = os.path.join(folder, "sparse", "0", file)
         shutil.move(source_file, destination_file)
 
-if __name__ == "__main__":
-    SCENE = "Bartender"
-    BASE_DIR = f"/work/Users/lisicheng/Dataset/GSC/{SCENE}"
+@dataclass
+class ColmapProcessConfig:
+    """Configuration for processing frames with COLMAP"""
+    scene: str
+    """Scene name (e.g., Bartender)"""
+    
+    base_dir: Optional[str] = None
+    """Base directory path. If not provided, defaults to examples/data/GSC/{scene}"""
+    
+    frame_num: int = 65
+    """Number of frames to process"""
+
+def main(config: ColmapProcessConfig):
+    # Process parameters
+    SCENE = config.scene
+    BASE_DIR = config.base_dir if config.base_dir else f"examples/data/GSC/{SCENE}"
     COLMAP_DIR = BASE_DIR + "/colmap"
-    FRAME_NUM = 65
+    FRAME_NUM = config.frame_num
     START_FRAME = DATASET_INFOS[SCENE]["start_frame"]
 
-    # # make sure every frame share the same camera extrinsic and intrinsic 
-    # for frame in trange(START_FRAME, START_FRAME+FRAME_NUM):
-    #     convertdynerftocolmapdb(Path(COLMAP_DIR), frame, )
+    print(f"Processing scene {SCENE} with {FRAME_NUM} frames starting from {START_FRAME}")
+    print(f"Base directory: {BASE_DIR}")
+    print(f"COLMAP directory: {COLMAP_DIR}")
+
+    # Make sure every frame share the same camera extrinsic and intrinsic
+    print("Converting DyNeRF format to COLMAP database for each frame...")
+    for frame in trange(START_FRAME, START_FRAME+FRAME_NUM):
+        convertdynerftocolmapdb(Path(COLMAP_DIR), frame)
     
-    # # run colmap for each frame to obtain initial point clouds
-    # for frame in range(START_FRAME+1, START_FRAME+FRAME_NUM):
-    #     getcolmapsinglen3d(Path(COLMAP_DIR), frame, )
-    getcolmapsinglen3d(Path(COLMAP_DIR), 50, )
+    # Run COLMAP for each frame to obtain initial point clouds
+    print("Running COLMAP for each frame to obtain initial point clouds...")
+    for frame in trange(START_FRAME, START_FRAME+FRAME_NUM):
+        getcolmapsinglen3d(Path(COLMAP_DIR), frame)
+    
+    print("COLMAP processing completed!")
+
+if __name__ == "__main__":
+    config = tyro.cli(ColmapProcessConfig)
+    main(config)

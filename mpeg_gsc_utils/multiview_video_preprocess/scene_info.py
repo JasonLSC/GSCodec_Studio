@@ -12,5 +12,6 @@ DATASET_INFOS = {
     },
     "Cinema": {
         "start_frame": 235,
+        "resolution": "1920x1080"
     },
 }

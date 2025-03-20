@@ -18,13 +18,15 @@ conda activate gscodec_studio
 
 ### Packages Installation
 
-Please install [Pytorch](https://pytorch.org/get-started/locally/) first.
-
-Then, you can install the gsplat library extended with more compression features from source code. In this way it will build the CUDA code during installation.
+Please install [Pytorch](https://pytorch.org/get-started/locally/) first. Then, you can install the gsplat library extended with more compression features from source code. In this way it will build the CUDA code during installation.
 
 ```bash
 pip install .
-# pip install -e . (develop mode)
+```
+
+If you want to do further development based on this framework, you use following command to install Python packages in editable mode.
+```bash
+pip install -e . # (develop)
 ```
 
 ## Examples
@@ -38,7 +40,10 @@ cd examples
 pip install -r requirements.txt
 # download mipnerf_360 benchmark data
 python datasets/download_dataset.py
-# or place other dataset under 'data' folder
+```
+You can download the Tanks and Temples dataset and Deep Blending dataset used in original 3DGS via [this link](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/datasets/input/tandt_db.zip) and place these datasets under 'data' folder.
+```bash
+# place other dataset, e.g Tanks and Temples dataset, under 'data' folder
 ln -s data/tandt /xxxx/Dataset/tandt
 ```
 
@@ -67,7 +72,7 @@ bash benchmarks/compression/final_exp/mcmc_tt_sim.sh
 
 **Dynamic Gaussian Splats Training and Compression**
 
-First, please follow the dataset preprocessing instruction described in the [file]((mpeg_gsc_utils/multiview_video_preprocess/README.md)) for training data prepration.
+First, please follow the dataset preprocessing instruction described in the [file](mpeg_gsc_utils/multiview_video_preprocess/README.md) for training data prepration.
 
 Next, run the script for dynamic gaussian splats training and compression.
 ```bash

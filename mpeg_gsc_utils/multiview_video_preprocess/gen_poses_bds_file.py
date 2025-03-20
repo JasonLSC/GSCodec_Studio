@@ -4,6 +4,9 @@ import numpy as np
 from pathlib import Path
 import shutil
 from tqdm import trange
+import tyro
+from dataclasses import dataclass
+from typing import Optional
 
 from mpeg_gsc_utils import colmap_read_model as read_model
 from scene_info import DATASET_INFOS
@@ -211,42 +214,74 @@ def gen_poses(basedir, match_type, factors=None):
     
     return True
 
-if __name__ == "__main__":
-    SCENE = "Bartender"
-    BASE_DIR = f"/work/Users/lisicheng/Dataset/GSC/{SCENE}"
+@dataclass
+class FramePrepConfig:
+    """Configuration for preparing frame data and generating poses"""
+    scene: str
+    """Scene name (e.g., Bartender)"""
+    
+    base_dir: Optional[str] = None
+    """Base directory path. If not provided, defaults to examples/data/GSC/{scene}"""
+    
+    frame_num: int = 65
+    """Number of frames to process"""
+    
+    match_type: str = "exhaustive_matcher"
+    """Matcher type for pose generation"""
+
+def main(config: FramePrepConfig):
+    # Process parameters
+    SCENE = config.scene
+    BASE_DIR = config.base_dir if config.base_dir else f"examples/data/GSC/{SCENE}"
     COLMAP_DIR = BASE_DIR + "/colmap"
-    FRAME_NUM = 65
+    FRAME_NUM = config.frame_num
     START_FRAME = DATASET_INFOS[SCENE]["start_frame"]
 
-    # copy png to each sub colmap dir
-    imgs_source_dir = Path(BASE_DIR + f"/png")
+    # Create COLMAP directory if it doesn't exist
+    os.makedirs(COLMAP_DIR, exist_ok=True)
 
+    print(f"Processing scene {SCENE} with {FRAME_NUM} frames starting from {START_FRAME}")
+    print(f"Base directory: {BASE_DIR}")
+    print(f"Working directory: {COLMAP_DIR}")
+
+    # Copy png to each frame directory
+    imgs_source_dir = Path(BASE_DIR + f"/png")
+    
+    print("Creating frame directories and copying images...")
     for f_idx in trange(START_FRAME, START_FRAME+FRAME_NUM):
         colmap_frame_dir = COLMAP_DIR + f"/colmap_{f_idx}"
         os.makedirs(colmap_frame_dir, exist_ok=True)
-        imgs_target_dir = colmap_frame_img_dir = Path(colmap_frame_dir + f"/input")
+        imgs_target_dir = Path(colmap_frame_dir + f"/input")
         os.makedirs(imgs_target_dir, exist_ok=True)
 
         for file in sorted(imgs_source_dir.glob(f"*{f_idx+1:03d}.png")):
             new_filenanme = file.name.split("_")[0] + ".png" 
             shutil.copy2(file, imgs_target_dir / new_filenanme)
         
-        # just a work-around for generating poses_bounds.npy
+        # Just a work-around for generating poses_bounds.npy
         if f_idx == START_FRAME:
             colmap_frame_dir = COLMAP_DIR + f"/colmap_{f_idx}"
             os.makedirs(colmap_frame_dir, exist_ok=True)
-            imgs_target_dir = colmap_frame_img_dir = Path(colmap_frame_dir + f"/images")
+            imgs_target_dir = Path(colmap_frame_dir + f"/images")
             os.makedirs(imgs_target_dir, exist_ok=True)
 
             for file in sorted(imgs_source_dir.glob(f"*{f_idx+1:03d}.png")):
                 new_filenanme = file.name.split("_")[0] + ".png" 
                 shutil.copy2(file, imgs_target_dir / new_filenanme)
     
-    # # get "poses_bounds.npy"
+    # Generate poses_bounds.npy
+    print("Generating poses_bounds.npy using COLMAP...")
     colmap_first_frame_dir = COLMAP_DIR + f"/colmap_{START_FRAME}"
     if not os.path.exists(colmap_first_frame_dir + "/poses_bounds.npy"):
-        gen_poses(colmap_first_frame_dir, match_type="exhaustive_matcher")
+        gen_poses(colmap_first_frame_dir, match_type=config.match_type)
 
-    # # move to basedir of the specific scene
+    # Move poses_bounds.npy to the base directory
+    print("Copying poses_bounds.npy to base directory...")
     shutil.copy2(colmap_first_frame_dir + "/poses_bounds.npy", COLMAP_DIR)
     shutil.rmtree(colmap_first_frame_dir + "/images")
+    
+    print("Frame preparation and pose generation completed!")
+
+if __name__ == "__main__":
+    config = tyro.cli(FramePrepConfig)
+    main(config)
