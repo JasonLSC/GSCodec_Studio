@@ -50,6 +50,8 @@ from gsplat.optimizers import SelectiveAdam
 from gsplat.compression_simulation import CompressionSimulation
 from gsplat.compression_simulation.entropy_model import Entropy_factorized_optimized_refactor, Entropy_gaussian
 
+from helper.ges_tm.pre_process_gaussian import load_ply_and_quant
+from helper.ges_tm.post_process_gaussian import inverse_load_ply
 
 
 @dataclass
@@ -89,6 +91,19 @@ def default_qp_values() -> Dict[str, Union[int, Dict[str, Any]]]:
 
 @dataclass
 class CompressionConfig:
+    rate_point: str = "rp0"
+
+@dataclass
+class PCCompressionConfig(CompressionConfig):
+    pcc_config_filename: str = "encoder_r05.cfg"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "pcc_config_filename": self.pcc_config_filename
+        }
+
+@dataclass
+class VideoCompressionConfig(CompressionConfig):
     # Use PLAS sort in compression or not
     use_sort: bool = True
     # Verbose or not
@@ -133,7 +148,7 @@ class Config:
     # qp: Optional[int] = None
     # Configuration for compression methods
     compression_cfg: CompressionConfig = field(
-        default_factory=CompressionConfig
+        default_factory=VideoCompressionConfig
     )
 
     # Enable profiler
@@ -298,6 +313,8 @@ class Config:
     data_dir: str = ""
     # frame num
     frame_num: int = 1
+    # anchor type
+    anchor_type: Literal["video", "pcc"] = "video"
 
 class Runner:
     def __init__(
@@ -347,17 +364,17 @@ class Runner:
         # load dataset
         self.trainset_list, self.valset_list = self.set_up_datasets(cfg.data_dir, cfg.frame_num, cfg)
 
-        compression_cfg = cfg.compression_cfg.to_dict()
+        self.compression_cfg = cfg.compression_cfg.to_dict()
         if cfg.compression == "seq_hevc":
-            self.compression_method = SeqHevcCompression(**compression_cfg)
+            self.compression_method = SeqHevcCompression(**self.compression_cfg)
 
     def load_ply_sequences(
         self, ply_dir: str, frame_num: int
     ) -> List[torch.nn.ParameterDict]:
-        self.filename_list = sorted(glob.glob(os.path.join(ply_dir, "*.ply")))
+        self.ply_filename_list = sorted(glob.glob(os.path.join(ply_dir, "*.ply")))
 
         splats_list = []
-        for filename in tqdm.tqdm(self.filename_list[:frame_num], desc="Loading .ply file"):
+        for filename in tqdm.tqdm(self.ply_filename_list[:frame_num], desc="Loading .ply file"):
             splats = load_ply(filename)
             splats_list.append(splats.to("cuda"))
         
@@ -396,11 +413,11 @@ class Runner:
         return trainset_list, valset_list
 
     def compress(self, ):
-        """Entry for running compression."""
-        print("Running compression...")
+        """Entry for running video anchor compression."""
+        print("Running video anchor compression...")
         world_rank = self.world_rank
 
-        compress_dir = f"{cfg.result_dir}/compression/rank{world_rank}"
+        compress_dir = f"{cfg.result_dir}/compression"
 
         if os.path.exists(compress_dir):
             shutil.rmtree(compress_dir)
@@ -409,14 +426,99 @@ class Runner:
         splats_videos = self.compression_method.reorganize(self.splats_list)
         self.compression_method.compress(compress_dir)
         video_splats_c = self.compression_method.decompress(compress_dir)
-        
-        # splats_list_c = self.compression_method.deorganize(splats_videos)
         splats_list_c = self.compression_method.deorganize(video_splats_c)
 
         for splats, splats_c in zip(self.splats_list, splats_list_c):
             for k in splats.keys():
                 splats[k].data = splats_c[k].to(self.device)
 
+        self.eval(stage="compress")
+
+    def pcc_compress(self, ):
+        """Entry for running pc anchor compression."""
+        print("Running pc anchor compression...")
+        import subprocess
+
+        compress_dir = f"{cfg.result_dir}/compression"
+        intermediate_dir = f"{cfg.result_dir}/intermediate"
+        log_dir = f"{cfg.result_dir}/log"
+        rec_dir = f"{cfg.result_dir}/rec"
+
+        if os.path.exists(compress_dir) or os.path.exists(intermediate_dir):
+            shutil.rmtree(compress_dir)
+            shutil.rmtree(intermediate_dir)
+            shutil.rmtree(log_dir)
+            # shutil.rmtree(rec_dir)
+        os.makedirs(compress_dir, exist_ok=True)
+        os.makedirs(intermediate_dir, exist_ok=True)
+        os.makedirs(log_dir, exist_ok=True)
+        os.makedirs(rec_dir, exist_ok=True)
+
+        for f_id, ply_file in enumerate(self.ply_filename_list[:self.frame_num]):
+            # preprocess: fixed-point quantization
+            temp_frame_dir = os.path.join(intermediate_dir, f"frame{f_id:03d}")
+            os.makedirs(temp_frame_dir, exist_ok=True)
+            load_ply_and_quant(ply_file, temp_frame_dir)
+
+            # encode
+            print(f"Encode frame{f_id:03d} via GeS-TM.")
+            quant_ply_file = temp_frame_dir + f"/quant_splats.ply"
+            encoded_bin_file = compress_dir + f"/frame{f_id:03d}.bin"
+            encode_cmd = [
+                './helper/ges_tm/tmc3',
+                '-c',
+                f"./helper/ges_tm/{self.compression_cfg['pcc_config_filename']}",
+                f'--uncompressedDataPath={quant_ply_file}',
+                f'--compressedStreamPath={encoded_bin_file}'
+            ]
+
+            encode_log_file = os.path.join(log_dir, f"frame{f_id:03d}_encode_log.txt")
+            with open(encode_log_file, 'w') as log_file:
+                result = subprocess.run(encode_cmd, 
+                                    capture_output=True, 
+                                    text=True, # output text rather than byte
+                                    )
+                log_file.write(result.stdout)
+                log_file.write(result.stderr)
+            
+            # decode
+            print(f"Decode frame{f_id:03d} via GeS-TM.")
+            decoded_ply_file = temp_frame_dir + f"/decoded_quant_splats.ply"
+            decode_cmd = [
+                './helper/ges_tm/tmc3',
+                '-c',
+                './helper/ges_tm/decoder.cfg',
+                f'--compressedStreamPath={encoded_bin_file}',
+                f'--reconstructedDataPath={decoded_ply_file}'
+            ]
+
+            decode_log_file = os.path.join(log_dir, f"frame{f_id:03d}_decode_log.txt")
+            with open(decode_log_file, 'w') as log_file:
+
+                start_time = time.time()
+                result = subprocess.run(decode_cmd, 
+                                    capture_output=True, 
+                                    text=True, # output text rather than byte
+                                    )
+                
+                end_time = time.time()
+                elapsed_time = end_time - start_time
+                
+                log_file.write(result.stdout)
+                log_file.write(f"\nExecution time of decoding: {elapsed_time:.3f} seconds\n")
+
+            print(f"Execution time of decoding: {elapsed_time:.3f} seconds")
+
+            # postprocess
+            output_filename = os.path.join(rec_dir, f"frame{f_id:03d}.ply")
+            inverse_load_ply(decoded_ply_file, output_filename)    
+
+        splats_list_c = self.load_ply_sequences(rec_dir, self.frame_num)
+
+        for splats, splats_c in zip(self.splats_list, splats_list_c):
+            for k in splats.keys():
+                splats[k].data = splats_c[k].to(self.device)
+        
         self.eval(stage="compress")
 
     def rasterize_splats(
@@ -583,7 +685,7 @@ class Runner:
                 return f"{size_bytes/(1024**3):.2f} GB"
             
         # rate summary
-        directory_path = os.path.join(self.cfg.result_dir, "compression", "rank0")
+        directory_path = os.path.join(self.cfg.result_dir, "compression")
         
         # Check if directory exists
         if not os.path.exists(directory_path):
@@ -646,29 +748,75 @@ class Runner:
 
 def main(local_rank: int, world_rank, world_size: int, cfg: Config):
     runner = Runner(local_rank, world_rank, world_size, cfg)
-
+    
     runner.eval()
-    runner.compress()
+    if cfg.anchor_type == "video":
+        runner.compress()
+    elif cfg.anchor_type == "pcc":
+        runner.pcc_compress()
+    else:
+        raise NotImplementedError(f"{cfg.anchor_type} Anchor has not been implemented.")
+    
     runner.summary()
     runner.stack_render_img_to_vid()
-    
 
 if __name__ == "__main__":
     configs = {
+        "pcc_compression_debug":(
+            "Use PCCompression.",
+            Config(
+                anchor_type="pcc",
+                compression_cfg=PCCompressionConfig()
+            )
+        ),
+        "pcc_compression_rp0":(
+            "Use PCCompression.",
+            Config(
+                anchor_type="pcc",
+                compression_cfg=PCCompressionConfig(
+                    pcc_config_filename="encoder_r05.cfg"
+                )
+            )
+        ),
+        "pcc_compression_rp1":(
+            "Use PCCompression.",
+            Config(
+                anchor_type="pcc",
+                compression_cfg=PCCompressionConfig(
+                    pcc_config_filename="encoder_r06.cfg"
+                )
+            )
+        ),
+        "pcc_compression_rp2":(
+            "Use PCCompression.",
+            Config(
+                anchor_type="pcc",
+                compression_cfg=PCCompressionConfig(
+                    pcc_config_filename="encoder_r07.cfg"
+                )
+            )
+        ),
+        "pcc_compression_rp3":(
+            "Use PCCompression.",
+            Config(
+                anchor_type="pcc",
+                compression_cfg=PCCompressionConfig(
+                    pcc_config_filename="encoder_r08.cfg"
+                )
+            )
+        ),
         "x265_compression_debug":(
             "Use HevcCompression.",
             Config(
                 compression="seq_hevc",
-                compression_cfg=CompressionConfig(
-                                                #   qp=4, 
-                                                  n_clusters=8192)
+                compression_cfg=VideoCompressionConfig(n_clusters=8192)
             )
         ),
         "x265_compression_rp0": (
             "Use HevcCompression.",
             Config(
                 compression="seq_hevc",
-                compression_cfg=CompressionConfig(
+                compression_cfg=VideoCompressionConfig(
                     qp={
                         "means": -1,
                         "opacities": 4,
@@ -688,7 +836,7 @@ if __name__ == "__main__":
             "Use HevcCompression.",
             Config(
                 compression="seq_hevc",
-                compression_cfg=CompressionConfig(
+                compression_cfg=VideoCompressionConfig(
                     qp={
                         "means": -1,
                         "opacities": 4,
@@ -708,7 +856,7 @@ if __name__ == "__main__":
             "Use HevcCompression.",
             Config(
                 compression="seq_hevc",
-                compression_cfg=CompressionConfig(
+                compression_cfg=VideoCompressionConfig(
                     qp={
                         "means": -1,
                         "opacities": 10,
@@ -728,7 +876,7 @@ if __name__ == "__main__":
             "Use HevcCompression.",
             Config(
                 compression="seq_hevc",
-                compression_cfg=CompressionConfig(
+                compression_cfg=VideoCompressionConfig(
                     qp={
                         "means": -1,
                         "opacities": 16,
