@@ -41,15 +41,15 @@ run_single_scene() {
     echo "Running $SCENE on GPU: $GPU_ID"
 
     # train without eval
-    # CUDA_VISIBLE_DEVICES=$GPU_ID python simple_trainer.py mcmc --eval_steps -1 --disable_viewer --data_factor 1 \
-    #     --strategy.cap-max $CAP_MAX \
-    #     --data_dir $SCENE_DIR/$SCENE/ \
-    #     --result_dir $RESULT_DIR/$SCENE/ \
-    #     --compression_sim \
-    #     --entropy_model_opt \
-    #     --rd_lambda $RD_LAMBDA \
-    #     --shN_ada_mask_opt \
-    #     --compression png
+    CUDA_VISIBLE_DEVICES=$GPU_ID python simple_trainer.py mcmc --eval_steps -1 --disable_viewer --data_factor 1 \
+        --strategy.cap-max $CAP_MAX \
+        --data_dir $SCENE_DIR/$SCENE/ \
+        --result_dir $RESULT_DIR/$SCENE/ \
+        --compression_sim \
+        --entropy_model_opt \
+        --rd_lambda $RD_LAMBDA \
+        --shN_ada_mask_opt \
+        --compression png
 
 
     # eval: use vgg for lpips to align with other benchmarks
