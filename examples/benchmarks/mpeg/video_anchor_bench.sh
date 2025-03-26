@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Define the list of GPU IDs to use
-GPU_IDS=(0 1 2 3)  # You can modify this list, e.g., GPU_IDS=(0 2 5 7)
+GPU_IDS=(4 5 6 7)  # You can modify this list, e.g., GPU_IDS=(0 2 5 7)
 
 # Function to run a single experiment
 run_experiment() {

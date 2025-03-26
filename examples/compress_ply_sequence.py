@@ -617,8 +617,8 @@ class Runner:
 
                 if world_rank == 0:
                     # write images 
-                    canvas = torch.cat(canvas_list, dim=2).squeeze(0).cpu().numpy() # side by side
-                    # canvas = canvas_list[1].squeeze(0).cpu().numpy() # signle image
+                    # canvas = torch.cat(canvas_list, dim=2).squeeze(0).cpu().numpy() # side by side
+                    canvas = canvas_list[1].squeeze(0).cpu().numpy() # signle image
                     canvas = (canvas * 255).astype(np.uint8)
                     imageio.imwrite(
                         f"{self.render_dir}/{stage}_frame{f_id:03d}_testv{v_id:03d}.png",
@@ -670,6 +670,39 @@ class Runner:
         # save metrics
         with open(f"{self.stats_dir}/{stage}.json", "w") as f:
             json.dump(seq_stats, f, indent=4)        
+
+    def eval_with_gsc_ctc_metrics(self, ):
+        from helper.mpeg_gsc.gsc_metric import run_QMIV_metric
+        from pathlib import Path
+        height, width = self.valset_list[0][0]["image"].shape[0:2]
+        resolution = f"{width}x{height}"
+
+        # path to save QMIV log
+        # if os.path.exists(f"{self.cfg.result_dir}/log"):
+        #     shutil.rmtree(f"{self.cfg.result_dir}/log")
+        os.makedirs(f"{self.cfg.result_dir}/log", exist_ok=True)
+
+        gsc_metrics_across_test_views = defaultdict(dict)
+        for test_view_id in range(len(self.cfg.test_view_id)):
+            render_YUV_filename = Path(f"{self.cfg.result_dir}/renders/compress_testv{test_view_id:03d}.yuv")
+            ref_YUV_filename = Path(f"{self.cfg.result_dir}/renders/val_testv{test_view_id:03d}.yuv")
+            saved_log_file = Path(f"{self.cfg.result_dir}/log/QMIV_testv{test_view_id:03d}.txt")
+
+            gsc_metrics = run_QMIV_metric(render_YUV_filename,
+                                          ref_YUV_filename,
+                                          resolution=resolution,
+                                          saved_log_file=saved_log_file,
+                                          pix_fmt="yuv420p")
+            gsc_metrics_across_test_views[f"testv{test_view_id:03d}"] = gsc_metrics
+        
+        metric_names = gsc_metrics_across_test_views[f"testv{0:03d}"].keys()
+        for metric in metric_names:
+            total = sum(gsc_metrics_across_test_views[f"testv{i:03d}"][metric] 
+                    for i in range(len(self.cfg.test_view_id)))
+            gsc_metrics_across_test_views["average"][metric] = total / len(self.cfg.test_view_id)
+        
+        with open(os.path.join(self.cfg.result_dir, "stats", "gsc_metrics.json"), "w") as fp:
+            json.dump(gsc_metrics_across_test_views, fp, indent=4)
 
     def summary(self,):
         import pandas as pd
@@ -736,8 +769,14 @@ class Runner:
             json.dump(rd_summary, fp, indent=4)
 
     def stack_render_img_to_vid(self):
+        # remove existing video files
+        for ext in ["*.mp4", "*.yuv"]:
+            for file in glob.glob(os.path.join(self.cfg.result_dir, "renders", ext)):
+                os.remove(file)
+
         for stage in ["compress", "val"]:
             for test_view_id in range(len(self.cfg.test_view_id)):
+                # png sequence to mp4 for visualization
                 cmd = (f'ffmpeg -framerate 30 -i "{self.cfg.result_dir}/renders/{stage}_frame%03d_testv{test_view_id:03d}.png" '
                     f'-c:v libx264 -pix_fmt yuv420p -crf 20 -preset medium '
                     f'-profile:v high -level 4.1 -movflags +faststart "{self.cfg.result_dir}/renders/{stage}_testv{test_view_id:03d}.mp4"')
@@ -745,6 +784,15 @@ class Runner:
                 print(f"Running: {cmd}")
                 os.system(cmd)
                 print(f"Video created for {stage}, test view {test_view_id}")
+
+                # png sequence to yuv for MPEG GSC metrics
+                cmd = (f'ffmpeg -framerate 30 -i "{self.cfg.result_dir}/renders/{stage}_frame%03d_testv{test_view_id:03d}.png" '
+                    f'-c:v rawvideo -pix_fmt yuv420p '
+                    f'"{self.cfg.result_dir}/renders/{stage}_testv{test_view_id:03d}.yuv"')
+                
+                print(f"Running: {cmd}")
+                os.system(cmd)
+                print(f"YUV Video created for {stage}, test view {test_view_id}")
 
 def main(local_rank: int, world_rank, world_size: int, cfg: Config):
     runner = Runner(local_rank, world_rank, world_size, cfg)
@@ -757,8 +805,9 @@ def main(local_rank: int, world_rank, world_size: int, cfg: Config):
     else:
         raise NotImplementedError(f"{cfg.anchor_type} Anchor has not been implemented.")
     
-    runner.summary()
     runner.stack_render_img_to_vid()
+    runner.eval_with_gsc_ctc_metrics()
+    runner.summary()
 
 if __name__ == "__main__":
     configs = {
@@ -774,7 +823,7 @@ if __name__ == "__main__":
             Config(
                 anchor_type="pcc",
                 compression_cfg=PCCompressionConfig(
-                    pcc_config_filename="encoder_r05.cfg"
+                    pcc_config_filename="encoder_r08.cfg"
                 )
             )
         ),
@@ -783,7 +832,7 @@ if __name__ == "__main__":
             Config(
                 anchor_type="pcc",
                 compression_cfg=PCCompressionConfig(
-                    pcc_config_filename="encoder_r06.cfg"
+                    pcc_config_filename="encoder_r07.cfg"
                 )
             )
         ),
@@ -792,7 +841,7 @@ if __name__ == "__main__":
             Config(
                 anchor_type="pcc",
                 compression_cfg=PCCompressionConfig(
-                    pcc_config_filename="encoder_r07.cfg"
+                    pcc_config_filename="encoder_r06.cfg"
                 )
             )
         ),
@@ -801,7 +850,7 @@ if __name__ == "__main__":
             Config(
                 anchor_type="pcc",
                 compression_cfg=PCCompressionConfig(
-                    pcc_config_filename="encoder_r08.cfg"
+                    pcc_config_filename="encoder_r05.cfg"
                 )
             )
         ),
