@@ -63,6 +63,7 @@ class SeqHevcCompression:
     })
     n_clusters: int = 32768
     debug: bool = False
+    use_all_intra: bool = False
 
     attribute_codec_registry: InitVar[Optional[Dict[str, str]]] = None
 
@@ -126,24 +127,74 @@ class SeqHevcCompression:
         else:
             return _decompress_npz
     
-    def sort(self, splats_list: List[Dict]) -> Tensor:
+    def compress(self, compress_dir: str) -> None:
+        """Run compression
+
+        Args:
+            compress_dir (str): directory to save compressed files
+        """
+
+        # Param-specific preprocessing
+        # splats["means"] = log_transform(splats["means"])
+        self.splats_videos["quats"] = F.normalize(self.splats_videos["quats"], dim=-1)
+
+        meta = {}
+        for param_name in self.splats_videos.keys():
+            compress_fn = self._get_compress_fn(param_name)
+            kwargs = {
+                "n_sidelen": int(self.splats_videos["means"].size(1)),
+                "qp": self.qp[param_name],
+                "use_all_intra": self.use_all_intra,
+                "debug": self.debug
+            }
+            meta[param_name] = compress_fn(
+                compress_dir, param_name, self.splats_videos[param_name], **kwargs
+            )
+
+        with open(os.path.join(compress_dir, "meta.json"), "w") as f:
+            json.dump(meta, f)
+
+    def decompress(self, compress_dir: str) -> Dict[str, Tensor]:
+        """Run decompression
+
+        Args:
+            compress_dir (str): directory that contains compressed files
+
+        Returns:
+            Dict[str, Tensor]: decompressed Gaussian splats
+        """
+        with open(os.path.join(compress_dir, "meta.json"), "r") as f:
+            meta = json.load(f)
+
+        splats = {}
+        for param_name, param_meta in meta.items():
+            decompress_fn = self._get_decompress_fn(param_name)
+            splats[param_name] = decompress_fn(compress_dir, param_name, param_meta)
+
+        # Param-specific postprocessing
+        # splats["means"] = inverse_log_transform(splats["means"])
+        return splats
+    
+    def sort_with_frame_index(self, splats_list: List[Dict], frame_id: int = 0) -> Tensor:
         """Organize the list of splats into several sequences of attributs
 
-        
-        """
-        first_splats = splats_list[0]
+        Args:
 
-        n_gs = len(first_splats["means"])
+        """
+        splats_to_be_sorted = splats_list[frame_id]
+
+        n_gs = len(splats_to_be_sorted["means"])
         n_sidelen = int(np.ceil(n_gs**0.5))
         n_pad = n_sidelen**2 - n_gs
         if n_pad != 0:
             # splats = _crop_n_splats(splats, n_crop)
-            first_splats = _pad_n_splats(first_splats, n_pad)
+            splats_to_be_sorted = _pad_n_splats(splats_to_be_sorted, n_pad)
             print(
                 f"Warning: Number of Gaussians was not square. Padded {n_pad} Gaussians."
             )
         
-        _, sorted_indices = sort_splats(first_splats, return_indices=True, sort_with_shN=False)
+        _, sorted_indices = sort_splats(splats_to_be_sorted, return_indices=True, sort_with_shN=False)
+        print(f"Finsh the sorting with frame {frame_id}.")
 
         return sorted_indices
     
@@ -187,15 +238,24 @@ class SeqHevcCompression:
         seq_attr_dict = self.splats_list_to_attribute_seq(splats_list)
         # pad
         padded_splats_videos = self.pad_attr_seq(seq_attr_dict)
+        
+        # random access
+        if not self.use_all_intra:
+            if self.use_sort:
+                ## get padded first splats
+                ## sort and get indices
+                sorted_indices = self.sort_with_frame_index(splats_list)
 
-        if self.use_sort:
-            ## get padded first splats
-            ## sort and get indices
-            sorted_indices = self.sort(splats_list)
+                ## use indices to sort the sequences of attributes
+                for attr_name, padded_splats_video in padded_splats_videos.items():
+                    padded_splats_videos[attr_name] = padded_splats_video[:, sorted_indices, ...]
+        else: # all intra
+            if self.use_sort:
+                for fr_id, _ in enumerate(splats_list):
+                    sorted_indices = self.sort_with_frame_index(splats_list, fr_id)
 
-            ## use indices to sort the sequences of attributes
-            for attr_name, padded_splats_video in padded_splats_videos.items():
-                padded_splats_videos[attr_name] = padded_splats_video[:, sorted_indices, ...]
+                    for attr_name, padded_splats_video in padded_splats_videos.items():
+                        padded_splats_video[fr_id] = padded_splats_video[fr_id][sorted_indices, ...]
 
         # reshape to 2d sequences
         n_gs = padded_splats_videos["means"].size(1)
@@ -233,52 +293,6 @@ class SeqHevcCompression:
         
         return splats_list
     
-    def compress(self, compress_dir: str) -> None:
-        """Run compression
-
-        Args:
-            compress_dir (str): directory to save compressed files
-        """
-
-        # Param-specific preprocessing
-        # splats["means"] = log_transform(splats["means"])
-        self.splats_videos["quats"] = F.normalize(self.splats_videos["quats"], dim=-1)
-
-        meta = {}
-        for param_name in self.splats_videos.keys():
-            compress_fn = self._get_compress_fn(param_name)
-            kwargs = {
-                # "verbose": self.verbose,
-                "n_sidelen": int(self.splats_videos["means"].size(1)),
-                "qp": self.qp[param_name]
-            }
-            meta[param_name] = compress_fn(
-                compress_dir, param_name, self.splats_videos[param_name], **kwargs
-            )
-
-        with open(os.path.join(compress_dir, "meta.json"), "w") as f:
-            json.dump(meta, f)
-
-    def decompress(self, compress_dir: str) -> Dict[str, Tensor]:
-        """Run decompression
-
-        Args:
-            compress_dir (str): directory that contains compressed files
-
-        Returns:
-            Dict[str, Tensor]: decompressed Gaussian splats
-        """
-        with open(os.path.join(compress_dir, "meta.json"), "r") as f:
-            meta = json.load(f)
-
-        splats = {}
-        for param_name, param_meta in meta.items():
-            decompress_fn = self._get_decompress_fn(param_name)
-            splats[param_name] = decompress_fn(compress_dir, param_name, param_meta)
-
-        # Param-specific postprocessing
-        # splats["means"] = inverse_log_transform(splats["means"])
-        return splats
 
 def _pad_n_splats(splats: Dict[str, Tensor], n_pad: int) -> Dict[str, Tensor]:
     for k, v in splats.items():
@@ -290,7 +304,13 @@ def _pad_n_splats(splats: Dict[str, Tensor], n_pad: int) -> Dict[str, Tensor]:
     return splats
 
 def _compress_video_hevc(
-        compress_dir: str, param_name: str, params: Tensor, n_sidelen: int, qp: int = 10, debug: bool = False
+        compress_dir: str, 
+        param_name: str, 
+        params: Tensor, 
+        n_sidelen: int, 
+        qp: int = 10, 
+        debug: bool = False,
+        use_all_intra: bool = False
 ) -> Dict[str, Any]:
     import imageio.v2 as imageio
     n_frames = int(params.size(0))
@@ -303,11 +323,14 @@ def _compress_video_hevc(
 
     video = (video_norm * (2**8 - 1)).round().astype(np.uint8)
     if video.shape[-1] != 3:
-        video = video.squeeze()
+        video = video[..., 0]
     np.save(os.path.join(compress_dir, f"{param_name}.npy"), video)
 
     # save each frame
-    for i in range(len(video)):
+    # if len(video.shape) == 2:  
+    #     imageio.imwrite(os.path.join(compress_dir, f"{param_name}_frame000.png"), video)
+    # else:  
+    for i in range(n_frames):
         imageio.imwrite(os.path.join(compress_dir, f"{param_name}_frame{i:03d}.png"), video[i])
     
     # run ffmpeg libx265 to compress PNG file
@@ -367,7 +390,13 @@ def _decompress_video_hevc(compress_dir: str, param_name: str, meta: Dict[str, A
     return params
 
 def _compress_video_hevc_16bit(
-        compress_dir: str, param_name: str, params: Tensor, n_sidelen: int, qp: int = 10, debug: bool = False
+        compress_dir: str, 
+        param_name: str, 
+        params: Tensor, 
+        n_sidelen: int, 
+        qp: int = 10, 
+        debug: bool = False,
+        use_all_intra: bool = False
 ) -> Dict[str, Any]:
     import imageio.v2 as imageio
     n_frames = int(params.size(0))
@@ -397,7 +426,14 @@ def _compress_video_hevc_16bit(
         file_extension = ".265" if debug else ".mp4"
         video_file = os.path.join(compress_dir, f"{param_name}_{byte_select}.{file_extension[1:]}")
 
-        cmd = f"ffmpeg -i {compress_dir}/{param_name}_{byte_select}_frame%03d.png -c:v libx265 -x265-params \"lossless=1:preset=veryslow\" {video_file}"
+        # old
+        intra_params = ":keyint=1:min-keyint=1:scenecut=0" if use_all_intra else ""
+        cmd = f"ffmpeg -i {compress_dir}/{param_name}_{byte_select}_frame%03d.png -c:v libx265 -x265-params \"lossless=1:preset=veryslow{intra_params}\" {video_file}"
+        
+        # new
+        # intra_params = "-intra" if use_all_intra else ""
+        # cmd = f"ffmpeg -i {compress_dir}/{param_name}_{byte_select}_frame%03d.png -c:v libx265 {intra_params} -x265-params \"lossless=1:preset=veryslow\" {video_file}"
+
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
 
     # remove png files
@@ -449,7 +485,15 @@ def _decompress_video_hevc_16bit(
     params = params.to(dtype=getattr(torch, meta["dtype"]))
     return params    
 
-def _compress_quats_video_hevc(compress_dir: str, param_name: str, params: Tensor, n_sidelen: int, qp: int = 10, debug: bool = False):
+def _compress_quats_video_hevc(
+        compress_dir: str, 
+        param_name: str, 
+        params: Tensor, 
+        n_sidelen: int, 
+        qp: int = 10, 
+        debug: bool = False,
+        use_all_intra: bool = True
+) -> Dict[str, Any]:
     import imageio.v2 as imageio
     n_frames = int(params.size(0))
 
@@ -472,15 +516,16 @@ def _compress_quats_video_hevc(compress_dir: str, param_name: str, params: Tenso
 
     # run ffmpeg libx265 to compress PNG file
     file_extension = ".265" if debug else ".mp4"
+    intra_params = ":keyint=1:min-keyint=1:scenecut=0" if use_all_intra else ""
 
     video_file = os.path.join(compress_dir, f"{param_name}_w.{file_extension[1:]}")
     print(f"QP value of {param_name}_w is: {qp}")
-    cmd = f"ffmpeg -i {compress_dir}/{param_name}_w_frame%03d.png -c:v libx265 -pix_fmt gray -x265-params \"qp={qp}\" {video_file}"
+    cmd = f"ffmpeg -i {compress_dir}/{param_name}_w_frame%03d.png -c:v libx265 -pix_fmt gray -x265-params \"qp={qp}{intra_params}\" {video_file}"
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
 
     video_file = os.path.join(compress_dir, f"{param_name}_xyz.{file_extension[1:]}")
     print(f"QP value of {param_name}_xyz is: {qp}")
-    cmd = f"ffmpeg -i {compress_dir}/{param_name}_xyz_frame%03d.png -c:v libx265 -x265-params \"qp={qp}\" {video_file}"
+    cmd = f"ffmpeg -i {compress_dir}/{param_name}_xyz_frame%03d.png -c:v libx265 -x265-params \"qp={qp}{intra_params}\" {video_file}"
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
 
     # remove png files
@@ -532,7 +577,15 @@ def _decompress_quats_video_hevc(
     params = params.to(dtype=getattr(torch, meta["dtype"]))
     return params    
 
-def _compress_shN_video_hevc(compress_dir: str, param_name: str, params: Tensor, n_sidelen: int, qp: Dict[str, int], debug: bool = False):
+def _compress_shN_video_hevc(
+        compress_dir: str, 
+        param_name: str, 
+        params: Tensor, 
+        n_sidelen: int, 
+        qp: Dict[str, int], 
+        debug: bool = False,
+        use_all_intra: bool = False
+) -> Dict[str, Any]:
     import imageio.v2 as imageio
     n_frames = int(params.size(0))
 
@@ -556,10 +609,11 @@ def _compress_shN_video_hevc(compress_dir: str, param_name: str, params: Tensor,
             imageio.imwrite(os.path.join(compress_dir, f"{param_name}_{shN_name}_frame{f_id:03d}.png"), image)
     
     file_extension = ".265" if debug else ".mp4"
+    intra_params = ":keyint=1:min-keyint=1:scenecut=0" if use_all_intra else ""
     for shN_id, shN_name in enumerate(shN_name_list):
         print(f"QP value of {shN_name} is: {qp[shN_name[0:3]]}")
         video_file = os.path.join(compress_dir, f"{param_name}_{shN_name}.{file_extension[1:]}")
-        cmd = f"ffmpeg -i {compress_dir}/{param_name}_{shN_name}_frame%03d.png -c:v libx265 -x265-params \"qp={qp[shN_name[0:3]]}\" {video_file}"
+        cmd = f"ffmpeg -i {compress_dir}/{param_name}_{shN_name}_frame%03d.png -c:v libx265 -x265-params \"qp={qp[shN_name[0:3]]}{intra_params}\" {video_file}"
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
     
     # remove png files

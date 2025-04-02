@@ -114,6 +114,8 @@ class VideoCompressionConfig(CompressionConfig):
     n_clusters: int = 32768
     # Maps attribute names to their codec functions
     attribute_codec_registry: Optional[AttributeCodecs] = field(default_factory=lambda: AttributeCodecs())
+    # Enable All Intra coding mode
+    use_all_intra: bool = False
     # Enable debug mode
     debug: bool = False
 
@@ -122,13 +124,13 @@ class VideoCompressionConfig(CompressionConfig):
         Convert the CompressionConfig instance to a dictionary.
         If attribute_codec_registry is not None, it will be converted to a dictionary using its to_dict method.
         """
-        result = {
-            "use_sort": self.use_sort,
-            "verbose": self.verbose,
-            "qp": self.qp,
-            "n_clusters": self.n_clusters,
-            "debug": self.debug,
-        }
+        # Get only attributes defined in VideoCompressionConfig
+        video_compression_attrs = [
+            "use_sort", "verbose", "qp", "n_clusters", 
+            "use_all_intra", "debug"
+        ]
+        
+        result = {attr: getattr(self, attr) for attr in video_compression_attrs}
 
         # handle attribute_codec_registry
         if self.attribute_codec_registry is not None:
