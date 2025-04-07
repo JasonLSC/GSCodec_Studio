@@ -1,7 +1,7 @@
-"""A simple example to render a (large-scale) Gaussian Splats
+"""A simple example to render a variant of Dynamic Gaussian Splats
 
 ```bash
-python examples/simple_viewer.py --scene_grid 13
+python examples/simple_viewer_dyn.py --ckpt {path_to_ckpt.pt}
 ```
 """
 
@@ -106,19 +106,26 @@ class DynGSRenderer:
 
         return means_motion, rotations, self.scales, opacity, colors_precomp
     
-    def render(self, cameraHandle, timestamp=0, ):
+    def render(self, cameraHandle, timestamp=0, render_mode="RGB"):
         means_t, quats_t, scales_t, opa_t, colors_t = self.slice_dyngs_to_3dgs(timestamp)
 
         c2w = get_c2w(cameraHandle)
         c2w = torch.from_numpy(c2w).float().to(self.device)
         viewmat = c2w.inverse()
 
+        # W = 1920
+        # H = int(W/cameraHandle.aspect)
+        # focal_x = W/2/np.tan(cameraHandle.fov/2)
+        # focal_y = H/2/np.tan(cameraHandle.fov/2)
+
         W, H = 1920, 1080
         focal_length = H / 2.0 / np.tan(cameraHandle.fov / 2.0)
+        focal_x = focal_length
+        focal_y = focal_length
         K = np.array(
                 [
-                    [focal_length, 0.0, W / 2.0],
-                    [0.0, focal_length, H / 2.0],
+                    [focal_x, 0.0, W / 2.0],
+                    [0.0, focal_y, H / 2.0],
                     [0.0, 0.0, 1.0],
                 ]
             )
@@ -135,13 +142,16 @@ class DynGSRenderer:
             W,
             H,
             # sh_degree=sh_degree,
-            render_mode="RGB",
+            render_mode="RGB+ED",
             # this is to speedup large-scale rendering by skipping far-away Gaussians.
             # radius_clip=3,
         )
 
-        render_rgbs = render_colors[0, ..., 0:3].cpu().numpy()
-        return render_rgbs
+        if render_mode == "RGB":
+            render = render_colors[0, ..., 0:3].cpu().numpy()
+        elif render_mode == "ED":
+            render = 1 / render_colors[0, ..., 3:].repeat_interleave(3, dim=-1).cpu().numpy()
+        return render
 
 class ViserViewer:
     def __init__(self, port):
@@ -157,6 +167,11 @@ class ViserViewer:
             )
             self.gui_next_frame = self.server.gui.add_button("Next Frame", disabled=True)
             self.gui_prev_frame = self.server.gui.add_button("Prev Frame", disabled=True)
+
+            self.gui_show_depth = self.server.gui.add_checkbox(
+                "Show Depth",
+                initial_value=False,
+            )
         
         @self.gui_playing.on_update
         def _(_) -> None:
@@ -177,6 +192,10 @@ class ViserViewer:
         def _(_) -> None:
             self.timestamp.value = (self.timestamp.value - 1) % 50
 
+        @self.gui_show_depth.on_update
+        def _(_) -> None:
+            self.need_update = True
+
         @self.server.on_client_connect
         def _(client: viser.ClientHandle):
             @client.camera.on_update
@@ -189,7 +208,10 @@ class ViserViewer:
         self.scene_rep = scene_rep
     
     def render(self, camera, timestamp):
-        return self.scene_rep.render(camera, timestamp)
+        if self.gui_show_depth.value:
+            return self.scene_rep.render(camera, timestamp, "ED")
+        else:
+            return self.scene_rep.render(camera, timestamp, "RGB")
     
     @torch.no_grad()
     def update(self):
@@ -198,13 +220,8 @@ class ViserViewer:
             for client in self.server.get_clients().values():
                 camera = client.camera
                 timestamp = self.timestamp.value / 50
-                # w2c = get_w2c(camera)
+                w2c = get_w2c(camera)
                 try:
-                    # W = 1920
-                    # H = int(W/camera.aspect)
-                    # focal_x = W/2/np.tan(camera.fov/2)
-                    # focal_y = H/2/np.tan(camera.fov/2)
-
                     start_cuda = torch.cuda.Event(enable_timing=True)
                     end_cuda = torch.cuda.Event(enable_timing=True)
                     start_cuda.record()
