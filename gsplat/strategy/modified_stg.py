@@ -118,46 +118,17 @@ class Modified_STG_Strategy(Strategy):
         if step >= self.refine_stop_iter:
             return True 
 
-        # if step >= self.refine_stop_iter:
-        #     # freeze weights of omega
-        #     params["omega"].grad = params["omega"].grad * self.omegamask # TODO check if this is proceed as expected
-        #     self.rotationmask = torch.logical_not(self.omegamask)
-        #     # freeze weights of rotation
-        #     params["quats"].grad = params["quats"].grad * self.rotationmask # TODO check if this is proceed as expected
-        #     if step % 1000 == 500 :
-        #         zmask = params["means"][:,2] < 4.5 # sicheng: actually, it is a really bad impl. in original STG
-        #         remove(params=params, optimizers=optimizers, state=state, mask=zmask)
-        #         self.omegamask = self._zero_omegabymotion(params, optimizers) # calculate omegamask again to adjust the change of gaussian numbers
-        #         torch.cuda.empty_cache()
-        #     if step == 10000: 
-        #         self.removeminmax(params=params, optimizers=optimizers, state=state, maxbounds=maxbounds, minbounds=minbounds)
-        #         self.omegamask = self._zero_omegabymotion(params, optimizers) # calculate omegamask again to adjust the change of gaussian numbers
-        #     return flag 
-
         self._update_state(params, state, info, packed=packed)
         
         # TODO: need to consider more strategy, there are totally 3 types of strategy in STG (densify = 1,2,3)
         # sicheng: in original STG, n3d scenes in night use densify=1, scenes in day use densify=2
         # here is a implementation of densify=1
         # omega & rotation mask
-
-        # if step ==  8001 :
-        #     omegamask = self._zero_omegabymotion(params, optimizers)
-        #     self.omegamask = omegamask
-        #     # record process
-        # elif step > 8001: 
-        #     # freeze weights of omega
-        #     params["omega"].grad = params["omega"].grad * self.omegamask # this is likely wrong
-        #     self.rotationmask = torch.logical_not(self.omegamask)
-        #     # freeze weights of rotation
-        #     params["quats"].grad = params["quats"].grad * self.rotationmask # this is likely wrong
         
         if (
             step > self.refine_start_iter
             and step % self.refine_every == 0
-            and step % self.reset_every >= self.pause_refine_after_reset
         ):
-            # if flag < desicnt:
             # grow GSs
             n_dupli, n_split = self._grow_gs(params, optimizers, state, step)
             if self.verbose:
@@ -165,15 +136,17 @@ class Modified_STG_Strategy(Strategy):
                     f"Step {step}: {n_dupli} GSs duplicated, {n_split} GSs split. "
                     f"Now having {len(params['means'])} GSs."
                 )
-            # according to STG, pruning don't proceed here
-
-            n_prune = self._prune_gs(params, optimizers, state, step)
-            if self.verbose:
-                print(
-                    f"Step {step}: {n_prune} GSs pruned. "
-                    f"Now having {len(params['means'])} GSs."
-                )
-            # torch.cuda.empty_cache() # check if this is needed
+            
+            # Don't prune points immediately after a opacity reset, as this might remove many useful points.
+            if step % self.reset_every >= self.pause_refine_after_reset:
+                # prune GSs
+                n_prune = self._prune_gs(params, optimizers, state, step)
+                if self.verbose:
+                    print(
+                        f"Step {step}: {n_prune} GSs pruned. "
+                        f"Now having {len(params['means'])} GSs."
+                    )
+                # torch.cuda.empty_cache() # check if this is needed
             
             # reset running stats
             state["grad2d"].zero_()
@@ -182,25 +155,13 @@ class Modified_STG_Strategy(Strategy):
                 state["radii"].zero_()
             torch.cuda.empty_cache()
             
-                # flag+=1
-            # else:
-            #     if step < 7000 : # defalt 7000. 
-            #         # prune GSs
-            #         n_prune = self._prune_gs(params, optimizers, state, step)
-            #         if self.verbose:
-            #             print(
-            #                 f"Step {step}: {n_prune} GSs pruned. "
-            #                 f"Now having {len(params['means'])} GSs."
-            #             )
-            #         torch.cuda.empty_cache() # check if this is needed
-            
-        # if step % self.reset_every == 0:
-        #     reset_opa(
-        #         params=params,
-        #         optimizers=optimizers,
-        #         state=state,
-        #         value=self.prune_opa * 2.0,    
-        #     )   
+        if step % self.reset_every == 0:
+            reset_opa(
+                params=params,
+                optimizers=optimizers,
+                state=state,
+                value=self.prune_opa * 2.0,
+            )   
             
         return flag 
 
@@ -326,11 +287,10 @@ class Modified_STG_Strategy(Strategy):
     ) -> int:
         is_prune = torch.sigmoid(params["opacities"].flatten()) < self.prune_opa
         if step > self.reset_every:
-            # In STG, scale is not considered when pruning
-            # is_too_big = (
-            #     torch.exp(params["scales"]).max(dim=-1).values
-            #     > self.prune_scale3d * state["scene_scale"]
-            # )
+            is_too_big = (
+                torch.exp(params["scales"]).max(dim=-1).values
+                > self.prune_scale3d * state["scene_scale"]
+            )
             
             # The official code also implements sreen-size pruning but
             # it's actually not being used due to a bug:
@@ -340,7 +300,7 @@ class Modified_STG_Strategy(Strategy):
             if step < self.refine_scale2d_stop_iter:
                 is_too_big |= state["radii"] > self.prune_scale2d
 
-            # is_prune = is_prune | is_too_big
+            is_prune = is_prune | is_too_big
 
         n_prune = is_prune.sum().item()
         if n_prune > 0:

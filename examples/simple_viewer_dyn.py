@@ -247,7 +247,7 @@ def main(local_rank: int, world_rank, world_size: int, args):
 
     dyn_gs = DynGSRenderer(args)
 
-    gui = ViserViewer(port=8080)
+    gui = ViserViewer(port=args.port)
 
     gui.set_scene_rep(dyn_gs)
 

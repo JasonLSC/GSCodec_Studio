@@ -72,7 +72,7 @@ def getNerfppNorm(cam_info):
         C2W_list.append(C2W)
 
     center, diagonal = get_center_and_diag(cam_centers)
-    radius = diagonal * 1.1
+    radius = diagonal 
 
     translate = -center
 
