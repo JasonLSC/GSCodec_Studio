@@ -1,11 +1,11 @@
 SCENE_DIR="data/GSC"
-SCENE_LIST="Cinema" # CBA Bartender Cinema
+SCENE_LIST="Bartender" # CBA Bartender Cinema
 
 declare -A TEST_VIEWS
 TEST_VIEWS=(
     ["CBA"]="7 22"
-    ["Bartender"]="8 10 12"
-    ["Cinema"]="8 10 12"
+    ["Bartender"]="9 11"
+    ["Cinema"]="9 11"
 )
 
 declare -A START_FRAMES
@@ -35,12 +35,12 @@ run_single_scene() {
         --downscale_factor 1 \
         --duration $NUM_FRAME \
         --batch_size 2 \
-        --max_steps 60_000 \
-        --refine_start_iter 3_000 \
-        --refine_stop_iter 30_000 \
+        --max_steps 50_000 \
+        --refine_start_iter 1_500 \
+        --refine_stop_iter 45_000 \
         --refine_every 100 \
-        --reset_every 6_000 \
-        --pause_refine_after_reset 500 \
+        --reset_every 5_000 \
+        --pause_refine_after_reset 2_000 \
         --strategy Modified_STG_Strategy \
         --test_view_id $TEST_VIEW_IDS 
     
