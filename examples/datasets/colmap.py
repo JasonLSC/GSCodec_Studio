@@ -161,8 +161,14 @@ class Parser:
 
         # Downsampled images may have different names vs images used for COLMAP,
         # so we need to map between the two sorted lists of files.
-        colmap_files = sorted(_get_rel_paths(colmap_image_dir))
-        image_files = sorted(_get_rel_paths(image_dir))
+        if os.path.exists(os.path.join(data_dir, "masks")): # Temporal warkaround on New Dataset, use Mask dir to verify
+            import re
+            colmap_files = sorted(_get_rel_paths(colmap_image_dir), key=lambda x: int(re.search(r'cam_(\d+)_', x).group(1)))
+            image_files = sorted(_get_rel_paths(image_dir), key=lambda x: int(re.search(r'cam_(\d+)_', x).group(1)))
+        else:
+            colmap_files = sorted(_get_rel_paths(colmap_image_dir))
+            image_files = sorted(_get_rel_paths(image_dir))
+
         colmap_to_image = dict(zip(colmap_files, image_files))
         image_paths = [os.path.join(image_dir, colmap_to_image[f]) for f in image_names]
 
